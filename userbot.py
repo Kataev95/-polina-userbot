@@ -46,13 +46,20 @@ async def main():
         sys.exit(1)
 
     me = await client.get_me()
-    config.OWNER_ID = me.id
+    config.SELF_ID = me.id
+    if not config.OWNER_ID:
+        # OWNER_ID не задан в env — режим selfbot: владелец = сам аккаунт Полины
+        config.OWNER_ID = me.id
     config.STARTED_AT = time.time()
 
     register_all(client)
     await timers_core.restore(client)
 
     log.info("✅ %s запущена на аккаунте: %s (id %s)", config.BOT_NAME, me.first_name, me.id)
+    if config.OWNER_ID != config.SELF_ID:
+        log.info("Команду .все принимаю из ЛС от владельца (id %s).", config.OWNER_ID)
+    else:
+        log.info("Режим selfbot: OWNER_ID не задан, команды — под самим аккаунтом Полины.")
     log.info("Отправьте .помощь в любой чат, чтобы увидеть список команд.")
 
     await client.run_until_disconnected()

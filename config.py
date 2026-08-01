@@ -68,11 +68,17 @@ TIMERS_PER_USER = 10                   # активных таймеров на 
 TIMER_TEXT_MAX = 200                   # максимум символов текста напоминания
 TIMER_COOLDOWN = 5                     # секунд между созданием таймеров одним человеком
 
-# .все — упоминание участников группы
-TAGALL_LIMIT = int(os.getenv("TAGALL_LIMIT", "100"))  # максимум людей за вызов
-TAGALL_BATCH = 5                                      # упоминаний в одном сообщении
-TAGALL_DELAY = 2.0                                    # пауза между сообщениями, сек
+# .все — «тихий призыв»: тег пачками с удалением, запуск владельцем из ЛС
+TAGALL_LIMIT = int(os.getenv("TAGALL_LIMIT", "200"))              # максимум людей за вызов
+TAGALL_BATCH = int(os.getenv("TAGALL_BATCH", "5"))               # упоминаний в одной пачке
+TAGALL_DELETE_DELAY = float(os.getenv("TAGALL_DELETE_DELAY", "1.0"))  # пауза перед удалением пачки, сек
+TAGALL_BATCH_PAUSE = float(os.getenv("TAGALL_BATCH_PAUSE", "1.5"))    # пауза между пачками, сек
+
+# ID ОСНОВНОГО аккаунта владельца — с него Полина принимает команду .все в ЛС
+# и туда же шлёт прогресс. Если не задан, используется сам аккаунт Полины
+# (режим selfbot: команды пишете под самой Полиной).
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # Заполняются при старте (userbot.py)
-OWNER_ID = 0
+SELF_ID = 0        # id аккаунта, на котором запущена Полина
 STARTED_AT = 0.0

@@ -1,10 +1,11 @@
-"""Команда .все — «тихий призыв» участников группы.
+"""Команда .все — «тихий призыв» участников группы + .стоп для прерывания.
 
 Запускается ВЛАДЕЛЬЦЕМ в личке с Полиной (со своего основного аккаунта):
 
     .все @bermuda_chat                 — тегнуть участников группы
     .все -1001234567890 Сбор на ферму! — с текстом в первой пачке
     .все                                — покажет подсказку
+    .стоп                               — прервать идущий тег
 
 Как работает:
 - Полина тегает участников пачками по 5 в ЦЕЛЕВОЙ группе;
@@ -31,6 +32,10 @@ log = logging.getLogger("polina.tagall")
 
 # group(1) — цель (@username или id), group(2) — необязательный текст
 PATTERN = re.compile(r"^\.(?:все|всех|all)(?:\s+(\S+))?(?:\s+([\s\S]+))?$", re.I)
+STOP_RE = re.compile(r"^\.(?:стоп|stop)$", re.I)
+
+# Состояние текущего тега (владелец один, параллельно не запускаем)
+_active = None  # {"cancel": bool, "title": str, "done": int, "total": int} | None
 
 
 def _help():
@@ -41,13 +46,12 @@ def _help():
         "`.все @bermuda_chat`\n"
         "`.все -1001234567890 Сбор на ферму!`\n\n"
         "Полина тегает по {0} чел., каждое сообщение сразу удаляет, "
-        "а прогресс шлёт сюда. Она должна состоять в группе "
-        "(для больших групп — лучше администратором)."
+        "а прогресс шлёт сюда. Прервать в любой момент — `.стоп`.\n"
+        "Она должна состоять в группе (для больших — лучше администратором)."
     ).format(config.TAGALL_BATCH)
 
 
 async def _resolve(client, target):
-    """@username / id -> entity (или None)."""
     try:
         key = int(target) if target.lstrip("-").isdigit() else target
         return await client.get_entity(key)
@@ -57,7 +61,6 @@ async def _resolve(client, target):
 
 
 async def _collect(client, entity):
-    """Список участников без ботов, удалённых, самой Полины и владельца."""
     users = []
     async for u in client.iter_participants(entity):
         if getattr(u, "bot", False) or getattr(u, "deleted", False):
@@ -72,8 +75,19 @@ async def _collect(client, entity):
 
 def register(client):
 
+    @client.on(events.NewMessage(pattern=STOP_RE))
+    async def stop_cmd(event):
+        if not event.is_private or event.sender_id != config.OWNER_ID:
+            return
+        if not _active:
+            await event.respond("ℹ️ Сейчас нет активного тега.")
+            return
+        _active["cancel"] = True
+        await event.respond("⛔️ Останавливаю тег…")
+
     @client.on(events.NewMessage(pattern=PATTERN))
     async def tagall_cmd(event):
+        global _active
         # Только личка и только владелец — иначе кто угодно запустит массовый тег
         if not event.is_private or event.sender_id != config.OWNER_ID:
             return
@@ -82,6 +96,14 @@ def register(client):
         extra = (event.pattern_match.group(2) or "").strip()
         if not target:
             await event.respond(_help())
+            return
+
+        if _active:
+            await event.respond(
+                "⏳ Уже идёт тег в «{0}» ({1}/{2}). Дождись окончания или пришли `.стоп`.".format(
+                    _active["title"], _active["done"], _active["total"]
+                )
+            )
             return
 
         entity = await _resolve(event.client, target)
@@ -112,46 +134,60 @@ def register(client):
             return
 
         total = len(users)
-        progress = await event.respond("📢 Тегаю в «{0}»…\nПрогресс: 0/{1}".format(title, total))
+        _active = {"cancel": False, "title": title, "done": 0, "total": total}
+        progress = await event.respond("📢 Тегаю в «{0}»…\nПрогресс: 0/{1}\n(прервать — `.стоп`)".format(title, total))
         done = 0
         sent = 0
 
-        for i in range(0, total, config.TAGALL_BATCH):
-            batch = users[i:i + config.TAGALL_BATCH]
-            mentions = " ".join(mention(u.id, u.first_name or "друг") for u in batch)
-            body = "{0}\n{1}".format(extra, mentions) if (extra and i == 0) else mentions
+        try:
+            for i in range(0, total, config.TAGALL_BATCH):
+                if _active["cancel"]:
+                    await progress.edit(
+                        "⛔️ Остановлено на {0}/{1} («{2}»). Отправлено и удалено {3} сообщений.".format(
+                            done, total, title, sent
+                        )
+                    )
+                    return
 
-            try:
-                msg = await event.client.send_message(entity, body)
-            except FloodWaitError as e:
-                await progress.edit(
-                    "⏳ Telegram просит паузу {0} c. Остановилась на {1}/{2}.".format(e.seconds, done, total)
-                )
-                return
-            except Exception as e:
-                log.warning(".все: ошибка отправки: %s", e)
-                await progress.edit(
-                    "🚫 Ошибка при отправке: `{0}`\nОстановилась на {1}/{2}.".format(str(e)[:120], done, total)
-                )
-                return
+                batch = users[i:i + config.TAGALL_BATCH]
+                mentions = " ".join(mention(u.id, u.first_name or "друг") for u in batch)
+                body = "{0}\n{1}".format(extra, mentions) if (extra and i == 0) else mentions
 
-            sent += 1
-            # пауза, чтобы уведомление успело дойти, затем удаляем сообщение
-            await asyncio.sleep(config.TAGALL_DELETE_DELAY)
-            try:
-                await msg.delete()
-            except Exception:
-                pass
+                try:
+                    msg = await event.client.send_message(entity, body)
+                except FloodWaitError as e:
+                    await progress.edit(
+                        "⏳ Telegram просит паузу {0} c. Остановилась на {1}/{2}.".format(e.seconds, done, total)
+                    )
+                    return
+                except Exception as e:
+                    log.warning(".все: ошибка отправки: %s", e)
+                    await progress.edit(
+                        "🚫 Ошибка при отправке: `{0}`\nОстановилась на {1}/{2}.".format(str(e)[:120], done, total)
+                    )
+                    return
 
-            done += len(batch)
-            try:
-                await progress.edit("📢 Тегаю в «{0}»…\nПрогресс: {1}/{2}".format(title, done, total))
-            except Exception:
-                pass
+                sent += 1
+                await asyncio.sleep(config.TAGALL_DELETE_DELAY)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
 
-            if i + config.TAGALL_BATCH < total:
-                await asyncio.sleep(config.TAGALL_BATCH_PAUSE)
+                done += len(batch)
+                _active["done"] = done
+                try:
+                    await progress.edit(
+                        "📢 Тегаю в «{0}»…\nПрогресс: {1}/{2}\n(прервать — `.стоп`)".format(title, done, total)
+                    )
+                except Exception:
+                    pass
 
-        await progress.edit(
-            "✅ Готово: «{0}»\nУпомянула {1} чел. за {2} сообщений — все удалены.".format(title, total, sent)
-        )
+                if i + config.TAGALL_BATCH < total:
+                    await asyncio.sleep(config.TAGALL_BATCH_PAUSE)
+
+            await progress.edit(
+                "✅ Готово: «{0}»\nУпомянула {1} чел. за {2} сообщений — все удалены.".format(title, total, sent)
+            )
+        finally:
+            _active = None

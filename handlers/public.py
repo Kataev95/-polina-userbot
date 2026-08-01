@@ -31,6 +31,13 @@ CANCEL_RE = re.compile(r"^(?:отмена|отмени|стоп)\s+(?:№\s*)?(\
 WEATHER_RE = re.compile(r"^погода\b[,:]?\s*(.*)$", re.I | re.S)
 HELP_RE = re.compile(r"^(?:помощь|команды|что\s+умеешь\??|help)\s*$", re.I)
 
+# Заметки
+NOTE_SAVE_RE = re.compile(r"^(?:запомни|сохрани)\b[,:]?\s*([\s\S]+)$", re.I)
+NOTE_DEL_RE = re.compile(r"^(?:забудь|удали)(?:\s+заметку)?\b[,:]?\s*(.+)$", re.I | re.S)
+NOTES_LIST_RE = re.compile(r"^заметки\b", re.I)
+NOTE_GET_RE = re.compile(r"^заметка\s+(.+)$", re.I | re.S)
+KEY_SPLIT_RE = re.compile(r"^([^\n:=]{1,30})\s*[:=]\s*([\s\S]+)$")
+
 
 def _public_help():
     n = config.BOT_NAME
@@ -40,7 +47,9 @@ def _public_help():
         "• «{0}, таймер в 18:30 созвон» — напоминание на время\n"
         "• «{0}, таймеры» — список активных\n"
         "• «{0}, отмена 5» — отменить таймер №5\n"
-        "• «{0}, погода Москва» — текущая погода"
+        "• «{0}, погода Москва» — текущая погода\n"
+        "• «{0}, запомни пароль: 1234» — сохранить заметку\n"
+        "• «{0}, заметки» — список · «{0}, заметка пароль» — показать · «{0}, забудь 3» — удалить"
     ).format(n)
 
 
@@ -78,6 +87,21 @@ def register(client):
         wm = WEATHER_RE.match(rest)
         if wm:
             await _weather(event, wm.group(1).strip())
+            return
+        sm = NOTE_SAVE_RE.match(rest)
+        if sm:
+            await _save_note(event, sender, sm.group(1))
+            return
+        dm = NOTE_DEL_RE.match(rest)
+        if dm:
+            await _del_note(event, dm.group(1), is_owner)
+            return
+        if NOTES_LIST_RE.match(rest):
+            await _list_notes(event)
+            return
+        gm = NOTE_GET_RE.match(rest)
+        if gm:
+            await _get_note(event, gm.group(1))
             return
         if HELP_RE.match(rest):
             await event.reply(_public_help())
@@ -160,3 +184,84 @@ async def _weather(event, city):
     except Exception as e:
         log.warning("погода: %s", e)
         await event.reply("⚠️ Не получилось узнать погоду, попробуйте позже.")
+
+
+# ---------- Заметки ----------
+
+async def _save_note(event, sender, spec):
+    spec = spec.strip()
+    if not spec:
+        await event.reply("📝 Что запомнить? Пример: «{0}, запомни пароль: 1234»".format(config.BOT_NAME))
+        return
+    key = ""
+    content = spec
+    km = KEY_SPLIT_RE.match(spec)
+    if km:
+        key = km.group(1).strip().lower()
+        content = km.group(2).strip()
+    content = content[:1000]
+    if not content:
+        await event.reply("📝 Пустая заметка.")
+        return
+    # Лимит 50 заметок на чат (обновление существующей именованной не считается новой)
+    is_update = bool(key) and db.get_note(event.chat_id, key=key) is not None
+    if not is_update and db.count_notes(event.chat_id) >= 50:
+        await event.reply("📝 Лимит 50 заметок. Удалите лишние: «{0}, забудь <№>».".format(config.BOT_NAME))
+        return
+    name = timers_core.clean_name(getattr(sender, "first_name", "") or "")
+    note_id, updated = db.add_note(event.chat_id, key, content, event.sender_id, name)
+    if key:
+        await event.reply("✅ {0} «{1}» (№{2}).".format("Обновила" if updated else "Запомнила", key, note_id))
+    else:
+        await event.reply("✅ Запомнила заметку №{0}.".format(note_id))
+
+
+async def _list_notes(event):
+    rows = db.list_notes(event.chat_id)
+    if not rows:
+        await event.reply("📝 Заметок пока нет. Добавьте: «{0}, запомни ...»".format(config.BOT_NAME))
+        return
+    lines = ["📌 **Заметки:**"]
+    for (nid, key, content, _aid, _an) in rows[:30]:
+        preview = (content if len(content) <= 60 else content[:57] + "…").replace("\n", " ")
+        if key:
+            lines.append("`#{0}` [{1}]: {2}".format(nid, key, preview))
+        else:
+            lines.append("`#{0}`: {1}".format(nid, preview))
+    if len(rows) > 30:
+        lines.append("… и ещё {0}".format(len(rows) - 30))
+    lines.append("\nПоказать: «{0}, заметка <ключ или №>» · Удалить: «{0}, забудь <№>»".format(config.BOT_NAME))
+    await event.reply("\n".join(lines))
+
+
+def _find_note(chat_id, ref):
+    ref = ref.strip()
+    row = None
+    if ref.isdigit():
+        row = db.get_note(chat_id, note_id=int(ref))
+    if row is None:
+        row = db.get_note(chat_id, key=ref.lower())
+    return row
+
+
+async def _get_note(event, ref):
+    row = _find_note(event.chat_id, ref)
+    if row is None:
+        await event.reply("🤷‍♀️ Не нашла заметку «{0}».".format(ref.strip()))
+        return
+    nid, key, content, _aid, _an = row
+    head = "[{0}] ".format(key) if key else ""
+    await event.reply("📌 {0}#{1}:\n{2}".format(head, nid, content))
+
+
+async def _del_note(event, ref, is_owner):
+    row = _find_note(event.chat_id, ref)
+    if row is None:
+        await event.reply("🤷‍♀️ Не нашла заметку «{0}».".format(ref.strip()))
+        return
+    nid, _key, _content, aid, _an = row
+    if aid != event.sender_id and not is_owner:
+        await event.reply("🚫 Удалить заметку может только её автор.")
+        return
+    db.delete_note(event.chat_id, nid)
+    await event.reply("✅ Заметка №{0} удалена.".format(nid))

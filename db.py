@@ -39,6 +39,24 @@ def init():
             public_enabled INTEGER DEFAULT 1
         )"""
     )
+    # Миграция: добавляем колонки приветствия, если их ещё нет
+    cols = {r[1] for r in _conn.execute("PRAGMA table_info(chat_settings)")}
+    if "welcome_on" not in cols:
+        _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_on INTEGER DEFAULT 0")
+    if "welcome_text" not in cols:
+        _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_text TEXT DEFAULT ''")
+
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            key TEXT DEFAULT '',
+            content TEXT NOT NULL,
+            author_id INTEGER,
+            author_name TEXT DEFAULT '',
+            created_ts REAL NOT NULL
+        )"""
+    )
     # Чистим завершённые таймеры старше 30 дней, чтобы база не разрасталась
     _conn.execute(
         "DELETE FROM timers WHERE status != 'active' AND created_ts < ?",
@@ -117,3 +135,101 @@ def set_public_enabled(chat_id, enabled):
             (chat_id, 1 if enabled else 0),
         )
         _conn.commit()
+
+
+# ---------- Приветствие новичков ----------
+
+def welcome_enabled(chat_id):
+    with _lock:
+        row = _conn.execute(
+            "SELECT welcome_on FROM chat_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return bool(row[0]) if row else False
+
+
+def get_welcome_text(chat_id):
+    with _lock:
+        row = _conn.execute(
+            "SELECT welcome_text FROM chat_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row[0] if row and row[0] else ""
+
+
+def set_welcome(chat_id, on=None, text=None):
+    with _lock:
+        _conn.execute("INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,))
+        if on is not None:
+            _conn.execute("UPDATE chat_settings SET welcome_on = ? WHERE chat_id = ?",
+                          (1 if on else 0, chat_id))
+        if text is not None:
+            _conn.execute("UPDATE chat_settings SET welcome_text = ? WHERE chat_id = ?",
+                          (text, chat_id))
+        _conn.commit()
+
+
+# ---------- Заметки ----------
+
+def add_note(chat_id, key, content, author_id, author_name):
+    """Именованная (key) — перезаписывается; безымянная — всегда новая.
+    -> (note_id, updated_bool)"""
+    with _lock:
+        if key:
+            existing = _conn.execute(
+                "SELECT id FROM notes WHERE chat_id = ? AND key = ?", (chat_id, key)
+            ).fetchone()
+            if existing:
+                _conn.execute(
+                    "UPDATE notes SET content = ?, author_id = ?, author_name = ?, created_ts = ? "
+                    "WHERE id = ?",
+                    (content, author_id, author_name, time.time(), existing[0]),
+                )
+                _conn.commit()
+                return existing[0], True
+        cur = _conn.execute(
+            "INSERT INTO notes (chat_id, key, content, author_id, author_name, created_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, key, content, author_id, author_name, time.time()),
+        )
+        _conn.commit()
+        return cur.lastrowid, False
+
+
+def list_notes(chat_id):
+    """-> [(id, key, content, author_id, author_name), ...]"""
+    with _lock:
+        return _conn.execute(
+            "SELECT id, key, content, author_id, author_name FROM notes "
+            "WHERE chat_id = ? ORDER BY id",
+            (chat_id,),
+        ).fetchall()
+
+
+def get_note(chat_id, key=None, note_id=None):
+    with _lock:
+        if note_id is not None:
+            return _conn.execute(
+                "SELECT id, key, content, author_id, author_name FROM notes "
+                "WHERE chat_id = ? AND id = ?",
+                (chat_id, note_id),
+            ).fetchone()
+        if key:
+            return _conn.execute(
+                "SELECT id, key, content, author_id, author_name FROM notes "
+                "WHERE chat_id = ? AND key = ?",
+                (chat_id, key),
+            ).fetchone()
+        return None
+
+
+def delete_note(chat_id, note_id):
+    with _lock:
+        _conn.execute("DELETE FROM notes WHERE chat_id = ? AND id = ?", (chat_id, note_id))
+        _conn.commit()
+
+
+def count_notes(chat_id):
+    with _lock:
+        row = _conn.execute(
+            "SELECT COUNT(*) FROM notes WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        return row[0] if row else 0

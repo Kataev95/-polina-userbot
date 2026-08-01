@@ -21,6 +21,7 @@ import db
 import timers_core
 from timeparse import parse_when, parse_duration, human_delta
 from weather_api import get_weather_text
+from . import fun
 
 log = logging.getLogger("polina.public")
 
@@ -40,6 +41,12 @@ NOTES_LIST_RE = re.compile(r"^заметки\b", re.I)
 NOTE_GET_RE = re.compile(r"^заметка\s+(.+)$", re.I | re.S)
 KEY_SPLIT_RE = re.compile(r"^([^\n:=]{1,30})\s*[:=]\s*([\s\S]+)$")
 
+# Развлечения. (?!-) в «кто» — чтобы не ловить «кто-нибудь», «кто-то»
+FUN_WHO_RE = re.compile(r"^кто(?!-)\b[,:]?\s*(.*)$", re.I | re.S)
+FUN_CHOOSE_RE = re.compile(r"^(?:выбери|выбор)\b[,:]?\s*(.*)$", re.I | re.S)
+FUN_DICE_RE = re.compile(r"^(?:брось\s+)?кубик\b", re.I)
+FUN_BALL_RE = re.compile(r"^шар\b[,:]?\s*(.*)$", re.I | re.S)
+
 
 def _public_help():
     n = config.BOT_NAME
@@ -52,7 +59,9 @@ def _public_help():
         "• «{0}, отмена 5» — отменить таймер №5\n"
         "• «{0}, погода Москва» — текущая погода\n"
         "• «{0}, запомни пароль: 1234» — сохранить заметку\n"
-        "• «{0}, заметки» — список · «{0}, заметка пароль» — показать · «{0}, забудь 3» — удалить"
+        "• «{0}, заметки» — список · «{0}, заметка пароль» — показать · «{0}, забудь 3» — удалить\n"
+        "• «{0}, кто самый умный?» — выберу случайного из чата 🎯\n"
+        "• «{0}, выбери: пицца или суши» · «{0}, кубик» 🎲 · «{0}, шар: вопрос?» 🔮"
     ).format(n)
 
 
@@ -112,6 +121,25 @@ def register(client):
         gm = NOTE_GET_RE.match(rest)
         if gm:
             await _get_note(event, gm.group(1))
+            return
+        fm = FUN_WHO_RE.match(rest)
+        if fm:
+            if not fun.on_cooldown(event.sender_id):
+                await fun.who(event, fm.group(1))
+            return
+        fm = FUN_CHOOSE_RE.match(rest)
+        if fm:
+            if not fun.on_cooldown(event.sender_id):
+                await fun.choose(event, fm.group(1))
+            return
+        if FUN_DICE_RE.match(rest):
+            if not fun.on_cooldown(event.sender_id):
+                await fun.dice(event)
+            return
+        fm = FUN_BALL_RE.match(rest)
+        if fm:
+            if not fun.on_cooldown(event.sender_id):
+                await fun.ball(event, fm.group(1))
             return
         if HELP_RE.match(rest):
             await event.reply(_public_help())

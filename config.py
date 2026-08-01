@@ -65,6 +65,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", str(_default_data)))
 # Таймеры
 TIMER_MIN_SECONDS = 10                 # минимальный таймер
 TIMER_MAX_SECONDS = 60 * 24 * 3600     # максимальный — 60 дней
+REPEAT_MIN_SECONDS = 300               # минимальный интервал повтора — 5 минут (анти-спам)
 TIMERS_PER_USER = 10                   # активных таймеров на человека в одном чате
 TIMER_TEXT_MAX = 200                   # максимум символов текста напоминания
 TIMER_COOLDOWN = 5                     # секунд между созданием таймеров одним человеком

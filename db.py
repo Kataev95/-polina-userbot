@@ -30,9 +30,14 @@ def init():
             due_ts REAL NOT NULL,
             text TEXT DEFAULT '',
             created_ts REAL NOT NULL,
-            status TEXT DEFAULT 'active'
+            status TEXT DEFAULT 'active',
+            repeat_seconds INTEGER DEFAULT 0
         )"""
     )
+    # Миграция для старых баз: добавляем колонку повтора, если её нет
+    tcols = {r[1] for r in _conn.execute("PRAGMA table_info(timers)")}
+    if "repeat_seconds" not in tcols:
+        _conn.execute("ALTER TABLE timers ADD COLUMN repeat_seconds INTEGER DEFAULT 0")
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS chat_settings (
             chat_id INTEGER PRIMARY KEY,
@@ -73,30 +78,30 @@ def init():
 
 # ---------- Таймеры ----------
 
-def add_timer(chat_id, user_id, user_name, message_id, due_ts, text):
+def add_timer(chat_id, user_id, user_name, message_id, due_ts, text, repeat_seconds=0):
     with _lock:
         cur = _conn.execute(
-            "INSERT INTO timers (chat_id, user_id, user_name, message_id, due_ts, text, created_ts) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, user_id, user_name, message_id, due_ts, text, time.time()),
+            "INSERT INTO timers (chat_id, user_id, user_name, message_id, due_ts, text, created_ts, repeat_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, user_id, user_name, message_id, due_ts, text, time.time(), int(repeat_seconds)),
         )
         _conn.commit()
         return cur.lastrowid
 
 
 def get_timer(timer_id):
-    """-> (id, chat_id, user_id, user_name, message_id, due_ts, text, status) или None"""
+    """-> (id, chat_id, user_id, user_name, message_id, due_ts, text, status, repeat_seconds) или None"""
     with _lock:
         return _conn.execute(
-            "SELECT id, chat_id, user_id, user_name, message_id, due_ts, text, status "
+            "SELECT id, chat_id, user_id, user_name, message_id, due_ts, text, status, repeat_seconds "
             "FROM timers WHERE id = ?",
             (timer_id,),
         ).fetchone()
 
 
 def active_timers(chat_id=None):
-    """-> [(id, chat_id, user_id, user_name, message_id, due_ts, text), ...] по времени срабатывания"""
-    q = ("SELECT id, chat_id, user_id, user_name, message_id, due_ts, text "
+    """-> [(id, chat_id, user_id, user_name, message_id, due_ts, text, repeat_seconds), ...]"""
+    q = ("SELECT id, chat_id, user_id, user_name, message_id, due_ts, text, repeat_seconds "
          "FROM timers WHERE status = 'active'")
     args = ()
     if chat_id is not None:
@@ -105,6 +110,13 @@ def active_timers(chat_id=None):
     q += " ORDER BY due_ts"
     with _lock:
         return _conn.execute(q, args).fetchall()
+
+
+def reschedule_timer(timer_id, due_ts):
+    """Перенести срабатывание (для повторяющихся таймеров)."""
+    with _lock:
+        _conn.execute("UPDATE timers SET due_ts = ? WHERE id = ?", (due_ts, timer_id))
+        _conn.commit()
 
 
 def set_status(timer_id, status):

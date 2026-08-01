@@ -12,13 +12,14 @@
 import logging
 import re
 import time
+from datetime import datetime, timedelta
 
 from telethon import events
 
 import config
 import db
 import timers_core
-from timeparse import parse_when, human_delta
+from timeparse import parse_when, parse_duration, human_delta
 from weather_api import get_weather_text
 
 log = logging.getLogger("polina.public")
@@ -26,6 +27,7 @@ log = logging.getLogger("polina.public")
 _last_timer_at = {}  # user_id -> ts, анти-флуд на создание таймеров
 
 TIMER_RE = re.compile(r"^(?:таймер|напомни(?:ть)?|напоминание)\b[,:]?\s*(.+)$", re.I | re.S)
+EVERY_RE = re.compile(r"^кажд(?:ые|ый|ую|ое)\b[,:]?\s*(.+)$", re.I | re.S)
 LIST_RE = re.compile(r"^таймеры\b", re.I)
 CANCEL_RE = re.compile(r"^(?:отмена|отмени|стоп)\s+(?:№\s*)?(\d+)\s*$", re.I)
 WEATHER_RE = re.compile(r"^погода\b[,:]?\s*(.*)$", re.I | re.S)
@@ -44,6 +46,7 @@ def _public_help():
     return (
         "👋 Я {0}. Что умею в этом чате:\n"
         "• «{0}, таймер через 4 часа ферма» — напомню и тегну вас\n"
+        "• «{0}, каждые 4 часа ферма» — буду напоминать по кругу до отмены\n"
         "• «{0}, таймер в 18:30 созвон» — напоминание на время\n"
         "• «{0}, таймеры» — список активных\n"
         "• «{0}, отмена 5» — отменить таймер №5\n"
@@ -76,6 +79,10 @@ def register(client):
         if not is_owner and not db.is_public_enabled(event.chat_id):
             return
 
+        em = EVERY_RE.match(rest)
+        if em:
+            await _create_every(event, sender, em.group(1))
+            return
         tm = TIMER_RE.match(rest)
         if tm:
             await _create_timer(event, sender, tm.group(1))
@@ -113,6 +120,12 @@ def register(client):
 
 
 async def _create_timer(event, sender, spec):
+    # «таймер каждые 4 часа ферма» — тоже повторяющийся
+    em = EVERY_RE.match(spec.strip())
+    if em:
+        await _create_every(event, sender, em.group(1))
+        return
+
     user_id = event.sender_id
     now = time.time()
     if now - _last_timer_at.get(user_id, 0) < config.TIMER_COOLDOWN:
@@ -150,16 +163,64 @@ async def _create_timer(event, sender, spec):
     await event.reply("⏰ Принято! Напомню через {0}{1} — таймер №{2}".format(parsed.human, label, timer_id))
 
 
+async def _create_every(event, sender, spec):
+    """«каждые 4 часа ферма» — повторяющееся напоминание до отмены."""
+    user_id = event.sender_id
+    now = time.time()
+    if now - _last_timer_at.get(user_id, 0) < config.TIMER_COOLDOWN:
+        return  # тихий анти-флуд
+
+    r = parse_duration(spec)
+    if r is None:
+        await event.reply(
+            "🔁 Не поняла интервал. Примеры:\n"
+            "• {0}, каждые 4 часа ферма\n"
+            "• {0}, каждый час вода\n"
+            "• {0}, каждые 30 минут проверка".format(config.BOT_NAME)
+        )
+        return
+    interval, text = r
+    if interval < config.REPEAT_MIN_SECONDS:
+        await event.reply("🔁 Слишком часто — минимальный повтор {0}.".format(
+            human_delta(config.REPEAT_MIN_SECONDS)))
+        return
+    if interval > config.TIMER_MAX_SECONDS:
+        await event.reply("🔁 Слишком редко — максимум 60 дней.")
+        return
+    if db.count_active(event.chat_id, user_id) >= config.TIMERS_PER_USER:
+        await event.reply(
+            "⏰ У вас уже {0} активных таймеров в этом чате — это максимум.".format(config.TIMERS_PER_USER)
+        )
+        return
+
+    _last_timer_at[user_id] = now
+    text = text.strip()[:config.TIMER_TEXT_MAX]
+    user_name = timers_core.clean_name(getattr(sender, "first_name", "") or "")
+    due_ts = now + interval
+    timer_id = db.add_timer(event.chat_id, user_id, user_name, event.id, due_ts, text,
+                            repeat_seconds=interval)
+    timers_core.schedule(event.client, timer_id, event.chat_id, user_id, user_name,
+                         event.id, due_ts, text, repeat_seconds=interval)
+    first = datetime.now(config.TIMEZONE) + timedelta(seconds=interval)
+    label = " «{0}»".format(text) if text else ""
+    await event.reply(
+        "🔁 Принято! Буду напоминать каждые {0}{1} — таймер №{2}.\n"
+        "Первое напоминание в {3}. Остановить: «{4}, отмена {2}»".format(
+            human_delta(interval), label, timer_id, first.strftime("%H:%M"), config.BOT_NAME)
+    )
+
+
 async def _list_timers(event):
     rows = db.active_timers(event.chat_id)
     if not rows:
         await event.reply("⏰ В этом чате нет активных таймеров.")
         return
     lines = ["⏰ **Активные таймеры:**"]
-    for (tid, _chat, _uid, uname, _mid, due_ts, text) in rows[:15]:
+    for (tid, _chat, _uid, uname, _mid, due_ts, text, repeat_seconds) in rows[:15]:
         left = human_delta(max(0, int(due_ts - time.time())))
         label = " — «{0}»".format(text) if text else ""
-        lines.append("№{0}: через {1}{2} · {3}".format(tid, left, label, uname or "кто-то"))
+        rep = " 🔁(кажд. {0})".format(human_delta(int(repeat_seconds))) if repeat_seconds else ""
+        lines.append("№{0}{1}: через {2}{3} · {4}".format(tid, rep, left, label, uname or "кто-то"))
     if len(rows) > 15:
         lines.append("… и ещё {0}".format(len(rows) - 15))
     lines.append("\nОтмена: «{0}, отмена N»".format(config.BOT_NAME))

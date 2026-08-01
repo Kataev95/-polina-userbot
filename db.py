@@ -45,6 +45,12 @@ def init():
         _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_on INTEGER DEFAULT 0")
     if "welcome_text" not in cols:
         _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_text TEXT DEFAULT ''")
+    if "welcome_mode" not in cols:
+        # 0 = сразу по входу, 1 = по сообщению-триггеру (напр. от SecurityBermuda)
+        _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_mode INTEGER DEFAULT 0")
+    if "welcome_trigger" not in cols:
+        # @username бота-триггера ИЛИ фраза; пусто = дефолтная фраза «добро пожаловать»
+        _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_trigger TEXT DEFAULT ''")
 
     _conn.execute(
         """CREATE TABLE IF NOT EXISTS notes (
@@ -155,7 +161,24 @@ def get_welcome_text(chat_id):
     return row[0] if row and row[0] else ""
 
 
-def set_welcome(chat_id, on=None, text=None):
+def get_welcome_mode(chat_id):
+    """0 = сразу по входу, 1 = по сообщению-триггеру."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT welcome_mode FROM chat_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def get_welcome_trigger(chat_id):
+    with _lock:
+        row = _conn.execute(
+            "SELECT welcome_trigger FROM chat_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row[0] if row and row[0] else ""
+
+
+def set_welcome(chat_id, on=None, text=None, mode=None, trigger=None):
     with _lock:
         _conn.execute("INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,))
         if on is not None:
@@ -164,6 +187,12 @@ def set_welcome(chat_id, on=None, text=None):
         if text is not None:
             _conn.execute("UPDATE chat_settings SET welcome_text = ? WHERE chat_id = ?",
                           (text, chat_id))
+        if mode is not None:
+            _conn.execute("UPDATE chat_settings SET welcome_mode = ? WHERE chat_id = ?",
+                          (int(mode), chat_id))
+        if trigger is not None:
+            _conn.execute("UPDATE chat_settings SET welcome_trigger = ? WHERE chat_id = ?",
+                          (trigger, chat_id))
         _conn.commit()
 
 

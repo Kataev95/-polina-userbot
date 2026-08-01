@@ -6,10 +6,12 @@
    вступил. Работает, если системное событие о входе доходит до Полины.
 
 2. «По триггеру» — для чатов, где бот-охранник (напр. SecurityBermuda)
-   удаляет системное сообщение о входе и сам пишет обезличенное «Добро
-   пожаловать». Тогда Полина ЗАПОМИНАЕТ вошедших (событие входа приходит в
-   момент входа, до удаления), а тегает их, когда появляется сообщение
-   бота-триггера — отвечая прямо на него.
+   удаляет системное сообщение о входе и сам пишет «Добро пожаловать».
+   Полина реагирует на сообщение бота-охранника и определяет новичка так:
+   a) берёт его ПРЯМО ИЗ СООБЩЕНИЯ охранника — если тот упомянул новичка
+      (кликабельное имя, tg://user-ссылка или @username) — самый надёжный путь;
+   b) если упоминания нет — берёт из очереди недавно вошедших (Полина
+      запоминает входы, пока системное сообщение ещё не удалено).
 
 Настройка — командой `.привет` в самой группе (под аккаунтом Полины или
 с вашего основного аккаунта):
@@ -18,15 +20,16 @@
     .привет вкл / .привет выкл    — включить / выключить
     .привет текст <шаблон>        — задать текст ({name}, {chat})
     .привет сразу                 — режим «сразу по входу»
-    .привет триггер               — режим «по триггеру» (фраза «добро пожаловать»)
-    .привет триггер @SecurityBermuda  — режим «по триггеру» от конкретного бота
-    .привет триггер добро пожаловать  — режим «по триггеру» по своей фразе
+    .привет триггер               — режим «по триггеру»: фраза «добро пожаловать» от любого бота
+    .привет триггер @SecurityBermuda  — «по триггеру»: «добро пожаловать» от конкретного бота
+    .привет триггер <фраза>       — «по триггеру»: своя фраза (от любого бота)
 """
 import logging
 import re
 import time
 
 from telethon import events
+from telethon.tl import types as tl_types
 
 import config
 import db
@@ -36,19 +39,24 @@ log = logging.getLogger("polina.welcome")
 
 DEFAULT = "👋 Добро пожаловать, {name}! Рады видеть тебя в «{chat}»."
 DEFAULT_TRIGGER = "добро пожаловать"
-PENDING_TTL = 900   # сколько секунд помним вошедшего (15 мин)
-PENDING_MAX = 20    # максимум в очереди на чат
+PENDING_TTL = 900       # сколько секунд помним вошедшего (15 мин)
+PENDING_MAX = 20        # максимум в очереди на чат
+GREET_DEDUP_TTL = 600   # не приветствуем одного человека чаще, чем раз в 10 мин
 
 CFG_RE = re.compile(r"^\.привет(?:\s+([\s\S]+))?$", re.I)
+_USER_URL_RE = re.compile(r"tg://user\?id=(\d+)")
 
-# Очередь недавно вошедших в памяти: chat_id -> [(user_id, name, ts), ...]
+# Очередь недавно вошедших: chat_id -> [(user_id, name, ts), ...]
 _pending = {}
+# Кого уже поприветствовали недавно: chat_id -> {user_id: ts}
+_greeted = {}
 
+
+# ---------- Очередь вошедших ----------
 
 def _add_pending(chat_id, user_id, name):
     now = time.time()
     lst = _pending.setdefault(chat_id, [])
-    # выбрасываем протухших и дубликаты этого же человека
     lst[:] = [(u, n, t) for (u, n, t) in lst if now - t < PENDING_TTL and u != user_id]
     lst.append((user_id, name, now))
     if len(lst) > PENDING_MAX:
@@ -56,7 +64,7 @@ def _add_pending(chat_id, user_id, name):
 
 
 def _pop_one(chat_id):
-    """Забрать самого раннего свежего новичка (FIFO). -> (user_id, name) | None"""
+    """Самый ранний свежий новичок (FIFO). -> (user_id, name) | None"""
     now = time.time()
     lst = _pending.get(chat_id, [])
     while lst:
@@ -65,6 +73,74 @@ def _pop_one(chat_id):
             return user_id, name
     return None
 
+
+def _remove_pending(chat_id, user_id):
+    lst = _pending.get(chat_id)
+    if lst:
+        lst[:] = [(u, n, t) for (u, n, t) in lst if u != user_id]
+
+
+# ---------- Анти-дубль приветствий ----------
+
+def _was_greeted(chat_id, user_id):
+    ts = _greeted.get(chat_id, {}).get(user_id)
+    return ts is not None and time.time() - ts < GREET_DEDUP_TTL
+
+
+def _mark_greeted(chat_id, user_id):
+    now = time.time()
+    d = _greeted.setdefault(chat_id, {})
+    for k in [k for k, v in d.items() if now - v > GREET_DEDUP_TTL]:
+        del d[k]
+    d[user_id] = now
+
+
+# ---------- Извлечение новичка из сообщения-триггера ----------
+
+def _slice_utf16(text, offset, length):
+    """Entity-офсеты Telegram считаются в UTF-16 — режем корректно."""
+    try:
+        b = text.encode("utf-16-le")
+        piece = b[offset * 2:(offset + length) * 2]
+        return piece.decode("utf-16-le", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+async def _extract_mentioned(event):
+    """Первый упомянутый в сообщении человек. -> (user_id, name) | None"""
+    msg = event.message
+    text = msg.raw_text or ""
+    ents = msg.entities or []
+
+    # 1) Кликабельное имя без @ (text mention) — так тегает SecurityBermuda
+    for e in ents:
+        if isinstance(e, tl_types.MessageEntityMentionName):
+            return e.user_id, _slice_utf16(text, e.offset, e.length)
+
+    # 2) Ссылка вида tg://user?id=123
+    for e in ents:
+        if isinstance(e, tl_types.MessageEntityTextUrl):
+            m = _USER_URL_RE.match(getattr(e, "url", "") or "")
+            if m:
+                return int(m.group(1)), _slice_utf16(text, e.offset, e.length)
+
+    # 3) Обычный @username в тексте
+    for e in ents:
+        if isinstance(e, tl_types.MessageEntityMention):
+            uname = _slice_utf16(text, e.offset, e.length)
+            if not uname:
+                continue
+            try:
+                u = await event.client.get_entity(uname)
+                if isinstance(u, tl_types.User) and not u.bot:
+                    return u.id, (u.first_name or uname)
+            except Exception:
+                pass
+    return None
+
+
+# ---------- Отправка приветствия ----------
 
 async def _chat_title(event):
     try:
@@ -75,7 +151,6 @@ async def _chat_title(event):
 
 
 async def _greet(client, chat_id, pairs, title, reply_to=None):
-    """pairs: [(user_id, name), ...]"""
     tmpl = db.get_welcome_text(chat_id) or DEFAULT
     names = ", ".join(mention(uid, nm or "друг") for uid, nm in pairs[:5])
     text = tmpl.replace("{name}", names).replace("{chat}", title)
@@ -129,41 +204,76 @@ def register(client):
             return  # в режиме триггера ждём сообщения бота-приветствия
 
         title = await _chat_title(event)
-        pairs = [(u.id, clean_name(u.first_name)) for u in users]
-        await _greet(client, event.chat_id, pairs, title, reply_to=event.action_message.id if event.action_message else None)
+        pairs = []
+        for u in users:
+            if not _was_greeted(event.chat_id, u.id):
+                _mark_greeted(event.chat_id, u.id)
+                pairs.append((u.id, clean_name(u.first_name)))
+        if not pairs:
+            return
+        reply_to = event.action_message.id if event.action_message else None
+        await _greet(client, event.chat_id, pairs, title, reply_to=reply_to)
 
     @client.on(events.NewMessage)
     async def on_trigger(event):
-        # Приветствие по сообщению бота-триггера (напр. SecurityBermuda)
+        # Приветствие по сообщению бота-охранника (напр. SecurityBermuda)
         cid = event.chat_id
-        if not event.is_group:
+        if not event.is_group or event.out:
             return
         if not db.welcome_enabled(cid) or db.get_welcome_mode(cid) != 1:
             return
 
         sender = await event.get_sender()
-        if sender is None or not getattr(sender, "bot", False):
-            return  # триггеримся только на сообщения ботов
+        if sender is None:
+            return
 
         trig = db.get_welcome_trigger(cid)
-        matched = False
+        text_low = (event.raw_text or "").lower()
+
         if trig.startswith("@"):
+            # от конкретного бота + обязательно фраза «добро пожаловать»
             uname = (getattr(sender, "username", "") or "").lower()
-            matched = uname == trig[1:].lower()
+            if uname != trig[1:].lower() or DEFAULT_TRIGGER not in text_low:
+                return
         else:
+            # по фразе — только от ботов, чтобы обычные люди не триггерили
+            if not getattr(sender, "bot", False):
+                return
             phrase = (trig or DEFAULT_TRIGGER).lower()
-            matched = phrase in (event.raw_text or "").lower()
-        if not matched:
+            if phrase not in text_low:
+                return
+
+        # 1) новичок прямо из сообщения охранника (надёжно)
+        pair = await _extract_mentioned(event)
+        via = "по упоминанию в сообщении охранника"
+        # 2) запасной путь — очередь недавно вошедших
+        if pair is None:
+            pair = _pop_one(cid)
+            via = "из очереди входов"
+        if pair is None:
+            log.info("триггер в %s: в сообщении нет упоминания и очередь входов пуста — пропускаю", cid)
             return
 
-        newbie = _pop_one(cid)
-        if newbie is None:
-            log.info("триггер приветствия сработал в %s, но очередь новичков пуста "
-                     "(событие входа не поймано?).", cid)
+        uid, name = pair
+        if uid in (config.SELF_ID, config.OWNER_ID):
             return
+        # уточняем имя и отсекаем ботов
+        try:
+            u = await event.client.get_entity(uid)
+            if getattr(u, "bot", False):
+                return
+            name = clean_name(getattr(u, "first_name", "") or name)
+        except Exception:
+            name = clean_name(name)
+
+        if _was_greeted(cid, uid):
+            return
+        _mark_greeted(cid, uid)
+        _remove_pending(cid, uid)
 
         title = await _chat_title(event)
-        await _greet(client, cid, [newbie], title, reply_to=event.id)
+        log.info("приветствую %s (id %s) в %s — %s", name, uid, cid, via)
+        await _greet(client, cid, [(uid, name)], title, reply_to=event.id)
 
     @client.on(events.NewMessage(pattern=CFG_RE))
     async def welcome_cfg(event):
@@ -191,8 +301,8 @@ def register(client):
                 "`.привет вкл` / `.привет выкл`\n"
                 "`.привет текст <шаблон>`  (плейсхолдеры `{{name}}`, `{{chat}}`)\n"
                 "`.привет сразу` — здороваться сразу по входу\n"
-                "`.привет триггер` — ждать «{3}» от бота-охранника\n"
-                "`.привет триггер @SecurityBermuda` — ждать сообщение конкретного бота".format(
+                "`.привет триггер` — по «{3}» от бота-охранника (новичка беру из его сообщения)\n"
+                "`.привет триггер @SecurityBermuda` — только от конкретного бота".format(
                     "включено ✅" if on else "выключено 🚫", mode_str, tmpl, DEFAULT_TRIGGER
                 ),
             )
@@ -212,16 +322,16 @@ def register(client):
             rest = arg[len("триггер"):].strip()
             db.set_welcome(cid, mode=1, on=True, trigger=rest)
             if rest.startswith("@"):
-                how = "жду сообщение от {0}".format(rest)
+                how = "жду «{0}» от {1}".format(DEFAULT_TRIGGER, rest)
             elif rest:
-                how = "жду сообщение с фразой «{0}»".format(rest)
+                how = "жду сообщение бота с фразой «{0}»".format(rest)
             else:
-                how = "жду сообщение с фразой «{0}»".format(DEFAULT_TRIGGER)
+                how = "жду сообщение бота с фразой «{0}»".format(DEFAULT_TRIGGER)
             await _say(
                 event,
-                "✅ Режим «по триггеру» включён — {0} и тегаю нового участника в ответ.\n"
-                "Полина запоминает вошедших сама; убедись, что она видит входы "
-                "(проверь логи в панели Bothost: строка «вход: …»).".format(how),
+                "✅ Режим «по триггеру» включён — {0}.\n"
+                "Новичка возьму из упоминания в сообщении охранника "
+                "(или из очереди входов, если упоминания нет) и отвечу на его сообщение.".format(how),
             )
         elif low.startswith("текст"):
             tmpl = arg[len("текст"):].strip()

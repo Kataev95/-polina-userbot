@@ -53,6 +53,8 @@ def register(client):
 
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"^\.(?:пинг|ping)$", re.I)))
     async def ping_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         t0 = time.perf_counter()
         msg = await event.edit("🏓 …")
         dt = (time.perf_counter() - t0) * 1000
@@ -65,6 +67,8 @@ def register(client):
 
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"^\.погода(?:\s+(.+))?$", re.I)))
     async def weather_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         city = (event.pattern_match.group(1) or "").strip()
         if not city:
             await event.edit("🌤 Использование: `.погода Москва`")
@@ -78,6 +82,8 @@ def register(client):
 
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"^\.(?:ид|id)$", re.I)))
     async def id_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         reply = await event.get_reply_message()
         lines = ["ℹ️ Чат: `{0}`".format(event.chat_id)]
         if reply and reply.sender_id:
@@ -87,6 +93,8 @@ def register(client):
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(
         r"^\.{0}\s+(вкл|выкл)\s*$".format(re.escape(config.BOT_NAME)), re.I)))
     async def toggle_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         on = event.pattern_match.group(1).lower() == "вкл"
         db.set_public_enabled(event.chat_id, on)
         state = "включены ✅" if on else "выключены 🚫"
@@ -96,6 +104,8 @@ def register(client):
 
     @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r"^\.(?:помощь|хелп|help)$", re.I)))
     async def help_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         await event.edit(_owner_help())
         await asyncio.sleep(60)
         try:

@@ -60,7 +60,13 @@ async def main():
         log.info("Команду .все принимаю из ЛС от владельца (id %s).", config.OWNER_ID)
     else:
         log.info("Режим selfbot: OWNER_ID не задан, команды — под самим аккаунтом Полины.")
-    log.info("Отправьте .помощь в любой чат, чтобы увидеть список команд.")
+    if config.ALLOWED_CHATS:
+        log.info("Работаю только в чатах: %s (плюс ЛС владельца).",
+                 ", ".join(str(c) for c in config.ALLOWED_CHATS))
+    else:
+        log.warning("ALLOWED_CHATS не задан — Полина реагирует во ВСЕХ чатах. "
+                    "Задайте ALLOWED_CHATS, чтобы ограничить одним чатом.")
+    log.info("Отправьте .помощь в разрешённый чат, чтобы увидеть список команд.")
 
     await client.run_until_disconnected()
 

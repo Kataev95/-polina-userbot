@@ -15,6 +15,7 @@
     TAGALL_LIMIT — максимум людей для .все (по умолчанию 100)
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -79,6 +80,33 @@ TAGALL_BATCH_PAUSE = float(os.getenv("TAGALL_BATCH_PAUSE", "1.5"))    # пауз
 # (режим selfbot: команды пишете под самой Полиной).
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# Белый список чатов: в каких чатах Полина вообще реагирует на команды и события.
+# Несколько — через запятую: "-1001849529736,-1009999999999".
+# Пусто = работать везде (без ограничения). ЛС владельца активно всегда.
+ALLOWED_CHATS = set()
+_raw_allowed = os.getenv("ALLOWED_CHATS", "").strip()
+if _raw_allowed:
+    for _part in re.split(r"[,\s]+", _raw_allowed):
+        _part = _part.strip()
+        if _part.lstrip("-").isdigit():
+            ALLOWED_CHATS.add(int(_part))
+
 # Заполняются при старте (userbot.py)
 SELF_ID = 0        # id аккаунта, на котором запущена Полина
 STARTED_AT = 0.0
+
+
+def chat_allowed(chat_id):
+    """True, если Полине разрешено работать в этом чате (или ограничения нет)."""
+    return (not ALLOWED_CHATS) or (chat_id in ALLOWED_CHATS)
+
+
+def responds_here(chat_id, is_private=False, sender_id=None):
+    """Единая проверка «реагировать ли здесь».
+
+    ЛС владельца — всегда активно (управление .все/.стоп и команды себе).
+    В остальных случаях — только в разрешённых чатах (ALLOWED_CHATS).
+    """
+    if is_private and OWNER_ID and sender_id == OWNER_ID:
+        return True
+    return chat_allowed(chat_id)

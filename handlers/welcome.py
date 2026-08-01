@@ -176,6 +176,8 @@ def register(client):
     async def on_join(event):
         if not (event.user_joined or event.user_added):
             return
+        if not config.chat_allowed(event.chat_id):
+            return
 
         users = list(event.users or [])
         if not users:
@@ -219,6 +221,8 @@ def register(client):
         # Приветствие по сообщению бота-охранника (напр. SecurityBermuda)
         cid = event.chat_id
         if not event.is_group or event.out:
+            return
+        if not config.chat_allowed(cid):
             return
         if not db.welcome_enabled(cid) or db.get_welcome_mode(cid) != 1:
             return
@@ -278,6 +282,8 @@ def register(client):
     @client.on(events.NewMessage(pattern=CFG_RE))
     async def welcome_cfg(event):
         if not (event.out or event.sender_id == config.OWNER_ID):
+            return
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
             return
         if event.is_private:
             await _say(event, "⚙️ Команду `.привет` используйте в самой группе, для которой настраиваете приветствие.")

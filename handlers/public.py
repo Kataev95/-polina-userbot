@@ -66,6 +66,9 @@ def register(client):
             return
         rest = m.group(1).strip()
 
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
+
         sender = await event.get_sender()
         if sender is None or getattr(sender, "bot", False):
             return

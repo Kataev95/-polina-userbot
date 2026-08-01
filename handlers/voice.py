@@ -26,6 +26,8 @@ def register(client):
 
     @client.on(events.NewMessage(outgoing=True, pattern=PATTERN))
     async def voice_cmd(event):
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
         text = (event.pattern_match.group(1) or "").strip()
         reply = await event.get_reply_message()
         if not text and reply:

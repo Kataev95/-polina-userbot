@@ -1,0 +1,11 @@
+# Полина — Telegram-юзербот (Telethon)
+telethon>=1.36
+edge-tts>=6.1
+aiohttp>=3.9
+python-dotenv>=1.0
+tzdata>=2024.1
+
+# ВАЖНО: ffmpeg-python здесь как маркер для Bothost — увидев его,
+# платформа автоматически установит системный ffmpeg в Docker-образ
+# (он нужен для конвертации озвучки в голосовые сообщения .гс).
+ffmpeg-python>=0.2.0

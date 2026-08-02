@@ -76,11 +76,32 @@ def init():
             created_ts REAL NOT NULL
         )"""
     )
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS chat_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT DEFAULT '',
+            text TEXT NOT NULL,
+            ts REAL NOT NULL
+        )"""
+    )
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_chatlog ON chat_log(chat_id, ts)")
+    _conn.execute(
+        """CREATE TABLE IF NOT EXISTS digest_cfg (
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            fire_time TEXT DEFAULT '21:00',
+            last_date TEXT DEFAULT ''
+        )"""
+    )
     # Чистим завершённые таймеры старше 30 дней, чтобы база не разрасталась
     _conn.execute(
         "DELETE FROM timers WHERE status != 'active' AND created_ts < ?",
         (time.time() - 30 * 86400,),
     )
+    # Лог чата храним максимум 3 суток
+    _conn.execute("DELETE FROM chat_log WHERE ts < ?", (time.time() - 3 * 86400,))
     _conn.commit()
 
 
@@ -214,6 +235,81 @@ def set_welcome(chat_id, on=None, text=None, mode=None, trigger=None):
             _conn.execute("UPDATE chat_settings SET welcome_trigger = ? WHERE chat_id = ?",
                           (trigger, chat_id))
         _conn.commit()
+
+
+# ---------- Лог чата и вечерний вестник (.вестник) ----------
+
+def log_message(chat_id, user_id, user_name, text):
+    with _lock:
+        _conn.execute(
+            "INSERT INTO chat_log (chat_id, user_id, user_name, text, ts) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, user_name, text[:400], time.time()),
+        )
+        _conn.commit()
+
+
+def get_log(chat_id, since_ts, limit=350):
+    """Последние сообщения за период, по возрастанию времени.
+    -> [(user_id, user_name, text, ts), ...]"""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT user_id, user_name, text, ts FROM chat_log "
+            "WHERE chat_id = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+            (chat_id, since_ts, limit),
+        ).fetchall()
+    return list(reversed(rows))
+
+
+def count_log(chat_id, since_ts):
+    with _lock:
+        row = _conn.execute(
+            "SELECT COUNT(*) FROM chat_log WHERE chat_id = ? AND ts >= ?",
+            (chat_id, since_ts),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def cleanup_log(before_ts):
+    with _lock:
+        _conn.execute("DELETE FROM chat_log WHERE ts < ?", (before_ts,))
+        _conn.commit()
+
+
+def digest_get(chat_id):
+    """-> (enabled, fire_time, last_date) | None"""
+    with _lock:
+        row = _conn.execute(
+            "SELECT enabled, fire_time, last_date FROM digest_cfg WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+    return (bool(row[0]), row[1], row[2]) if row else None
+
+
+def digest_set(chat_id, enabled=None, fire_time=None):
+    with _lock:
+        _conn.execute("INSERT OR IGNORE INTO digest_cfg (chat_id) VALUES (?)", (chat_id,))
+        if enabled is not None:
+            _conn.execute("UPDATE digest_cfg SET enabled = ? WHERE chat_id = ?",
+                          (1 if enabled else 0, chat_id))
+        if fire_time is not None:
+            _conn.execute("UPDATE digest_cfg SET fire_time = ? WHERE chat_id = ?",
+                          (fire_time, chat_id))
+        _conn.commit()
+
+
+def digest_mark_fired(chat_id, date_str):
+    with _lock:
+        _conn.execute("UPDATE digest_cfg SET last_date = ? WHERE chat_id = ?",
+                      (date_str, chat_id))
+        _conn.commit()
+
+
+def digest_enabled():
+    """-> [(chat_id, fire_time, last_date), ...] только включённые."""
+    with _lock:
+        return _conn.execute(
+            "SELECT chat_id, fire_time, last_date FROM digest_cfg WHERE enabled = 1"
+        ).fetchall()
 
 
 # ---------- Отложенные сообщения (.отложка) ----------

@@ -92,6 +92,13 @@ if _raw_allowed:
         if _part.lstrip("-").isdigit():
             ALLOWED_CHATS.add(int(_part))
 
+# ИИ-вестник: вечерний дайджест чата через AITunnel (aitunnel.ru)
+# Ключ задаётся ТОЛЬКО в панели Bothost, в код и чат не вставлять!
+AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "auto")  # auto = AITunnel сам выберет модель
+AI_URL = os.getenv("AI_URL", "https://api.aitunnel.ru/v1/chat/completions")
+DIGEST_TIME_DEFAULT = os.getenv("DIGEST_TIME", "21:00").strip()  # время выпуска по умолчанию
+
 # Заполняются при старте (userbot.py)
 SELF_ID = 0        # id аккаунта, на котором запущена Полина
 STARTED_AT = 0.0

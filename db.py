@@ -58,6 +58,14 @@ def init():
         _conn.execute("ALTER TABLE chat_settings ADD COLUMN welcome_trigger TEXT DEFAULT ''")
 
     _conn.execute(
+        """CREATE TABLE IF NOT EXISTS sched_topup (
+            chat_id INTEGER PRIMARY KEY,
+            interval_seconds INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1
+        )"""
+    )
+    _conn.execute(
         """CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
@@ -206,6 +214,48 @@ def set_welcome(chat_id, on=None, text=None, mode=None, trigger=None):
             _conn.execute("UPDATE chat_settings SET welcome_trigger = ? WHERE chat_id = ?",
                           (trigger, chat_id))
         _conn.commit()
+
+
+# ---------- Отложенные сообщения (.отложка) ----------
+
+def set_sched_config(chat_id, interval_seconds, text, enabled=True):
+    with _lock:
+        _conn.execute(
+            "INSERT INTO sched_topup (chat_id, interval_seconds, text, enabled) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET interval_seconds = excluded.interval_seconds, "
+            "text = excluded.text, enabled = excluded.enabled",
+            (chat_id, int(interval_seconds), text, 1 if enabled else 0),
+        )
+        _conn.commit()
+
+
+def get_sched_config(chat_id):
+    """-> (interval_seconds, text, enabled) | None"""
+    with _lock:
+        row = _conn.execute(
+            "SELECT interval_seconds, text, enabled FROM sched_topup WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+    return (row[0], row[1], bool(row[2])) if row else None
+
+
+def set_sched_enabled(chat_id, enabled):
+    """-> True, если настройка существовала."""
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE sched_topup SET enabled = ? WHERE chat_id = ?",
+            (1 if enabled else 0, chat_id),
+        )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def enabled_sched_configs():
+    """-> [(chat_id, interval_seconds, text), ...] только включённые."""
+    with _lock:
+        return _conn.execute(
+            "SELECT chat_id, interval_seconds, text FROM sched_topup WHERE enabled = 1"
+        ).fetchall()
 
 
 # ---------- Заметки ----------

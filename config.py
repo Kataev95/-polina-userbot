@@ -95,9 +95,11 @@ if _raw_allowed:
 # ИИ-вестник: вечерний дайджест чата через AITunnel (aitunnel.ru)
 # Ключ задаётся ТОЛЬКО в панели Bothost, в код и чат не вставлять!
 AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "auto")  # auto = AITunnel сам выберет модель
+AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4.5")  # контекст 200K — берём весь день
 AI_URL = os.getenv("AI_URL", "https://api.aitunnel.ru/v1/chat/completions")
 DIGEST_TIME_DEFAULT = os.getenv("DIGEST_TIME", "21:00").strip()  # время выпуска по умолчанию
+DIGEST_MAX_MESSAGES = int(os.getenv("DIGEST_MAX_MESSAGES", "3000"))   # сообщений в ИИ за выпуск
+DIGEST_MAX_CHARS = int(os.getenv("DIGEST_MAX_CHARS", "300000"))       # символов лога в ИИ
 
 # Заполняются при старте (userbot.py)
 SELF_ID = 0        # id аккаунта, на котором запущена Полина

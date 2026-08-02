@@ -31,10 +31,10 @@ from timers_core import clean_name
 log = logging.getLogger("polina.gossip")
 
 MIN_MESSAGES = 5        # меньше — выпуск не делаем (день был мёртвый)
-MAX_MESSAGES = 350      # сколько последних сообщений скармливаем ИИ
-MAX_LOG_CHARS = 12000   # общий лимит текста лога для ИИ
 CHUNK_LIMIT = 3900      # безопасный размер одного сообщения Telegram
 CHECK_EVERY = 30        # период проверки времени выпуска, сек
+# Лимиты подачи в ИИ берутся из config: DIGEST_MAX_MESSAGES / DIGEST_MAX_CHARS
+# (по умолчанию 3000 сообщений / 300К символов — claude-sonnet-4.5 вмещает весь день)
 
 PATTERN = re.compile(r"^\.вестник(?:\s+([\s\S]+))?$", re.I)
 TIME_RE = re.compile(r"^(\d{1,2})[:.](\d{2})$")
@@ -67,8 +67,14 @@ class GossipError(Exception):
 
 # ---------- Чистые функции ----------
 
-def build_log_text(rows, tz, max_chars=MAX_LOG_CHARS):
-    """rows: [(user_id, user_name, text, ts)] -> текст лога для ИИ (обрезая старое)."""
+def build_log_text(rows, tz, max_chars=None):
+    """rows: [(user_id, user_name, text, ts)] -> (текст лога для ИИ, сколько вошло).
+
+    Если день гигантский и не влезает в max_chars — старое отбрасывается,
+    остаются самые свежие сообщения.
+    """
+    if max_chars is None:
+        max_chars = config.DIGEST_MAX_CHARS
     lines = []
     for (uid, name, text, ts) in rows:
         hm = datetime.fromtimestamp(ts, tz).strftime("%H:%M")
@@ -81,7 +87,7 @@ def build_log_text(rows, tz, max_chars=MAX_LOG_CHARS):
         if total > max_chars:
             break
         kept.append(line)
-    return "\n".join(reversed(kept))
+    return "\n".join(reversed(kept)), len(kept)
 
 
 def render_mentions(text):
@@ -132,7 +138,7 @@ async def _ask_ai(user_content):
         ],
     }
     headers = {"Authorization": "Bearer " + config.AITUNNEL_API_KEY}
-    timeout = aiohttp.ClientTimeout(total=180)
+    timeout = aiohttp.ClientTimeout(total=300)  # большой лог + Claude = может думать долго
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(config.AI_URL, json=payload, headers=headers) as r:
@@ -158,7 +164,8 @@ async def make_digest(client, chat_id, force=False):
     """Собрать и опубликовать выпуск. Возвращает текст статуса для владельца."""
     now = datetime.now(timezone.utc)
     since = (now - timedelta(hours=24)).timestamp()
-    rows = db.get_log(chat_id, since, MAX_MESSAGES)
+    total_day = db.count_log(chat_id, since)
+    rows = db.get_log(chat_id, since, config.DIGEST_MAX_MESSAGES)
     if len(rows) < MIN_MESSAGES and not force:
         return "за день мало сообщений ({0}) — выпуск пропущен".format(len(rows))
     if not rows:
@@ -172,12 +179,17 @@ async def make_digest(client, chat_id, force=False):
         title = "чат"
 
     local_now = datetime.now(config.TIMEZONE)
-    log_text = build_log_text(rows, config.TIMEZONE)
+    log_text, used = build_log_text(rows, config.TIMEZONE)
+    if used < total_day:
+        count_line = "всего за день {0} сообщений, ниже — последние {1}".format(total_day, used)
+    else:
+        count_line = "{0} сообщений".format(used)
     user_content = (
-        "Сегодня {0}. Ниже — переписка чата «{1}» за день, {2} сообщений.\n"
-        "Формат строк: [ЧЧ:ММ] {{id:ЧИСЛО|Имя}}: текст\n\n{3}\n\n"
+        "Сегодня {0}. Ниже — переписка чата «{1}» за день ({2}).\n"
+        "Формат строк: [ЧЧ:ММ] {{id:ЧИСЛО|Имя}}: текст. Пометки вроде [фото], [стикер], "
+        "[голосовое] означают отправленные медиа.\n\n{3}\n\n"
         "Составь вечерний выпуск вестника по правилам из системного промпта.".format(
-            local_now.strftime("%d.%m.%Y"), title, len(rows), log_text)
+            local_now.strftime("%d.%m.%Y"), title, count_line, log_text)
     )
 
     content = await _ask_ai(user_content)
@@ -189,10 +201,34 @@ async def make_digest(client, chat_id, force=False):
 
     db.digest_mark_fired(chat_id, local_now.strftime("%Y-%m-%d"))
     db.cleanup_log(now.timestamp() - 3 * 86400)
-    return "выпуск опубликован ({0} сообщений в основе)".format(len(rows))
+    return "выпуск опубликован ({0} сообщений в основе)".format(used)
 
 
 # ---------- Обработчики ----------
+
+def _media_marker(event):
+    """Пометка типа медиа для лога — стикеры и гс тоже материал для сплетен."""
+    try:
+        if getattr(event, "sticker", None) is not None:
+            return "[стикер]"
+        if getattr(event, "gif", None) is not None:
+            return "[гифка]"
+        if getattr(event, "photo", None) is not None:
+            return "[фото]"
+        if getattr(event, "voice", None) is not None:
+            return "[голосовое]"
+        if getattr(event, "video_note", None) is not None:
+            return "[кружок]"
+        if getattr(event, "video", None) is not None:
+            return "[видео]"
+        if getattr(event, "audio", None) is not None:
+            return "[аудио]"
+        if getattr(event, "document", None) is not None:
+            return "[файл]"
+    except Exception:
+        pass
+    return ""
+
 
 async def _say(event, text):
     if event.out:
@@ -205,13 +241,18 @@ def register(client):
 
     @client.on(events.NewMessage())
     async def chat_logger(event):
-        # Тихо копим лог: только группы из белого списка, только человеческий текст
+        # Тихо копим лог: только группы из белого списка, только сообщения людей
         if not event.is_group or event.out:
             return
         if not config.chat_allowed(event.chat_id):
             return
         text = (event.raw_text or "").strip()
-        if not text or text.startswith("."):
+        if text.startswith("."):
+            return  # служебные команды в вестник не попадают
+        marker = _media_marker(event)
+        if marker:
+            text = (text + " " + marker).strip() if text else marker
+        if not text:
             return
         sender = await event.get_sender()
         if sender is None or getattr(sender, "bot", False):
@@ -243,11 +284,12 @@ def register(client):
                 event,
                 "🗞 **Вечерний вестник**: {0}\n"
                 "Время выпуска: {1} ({2})\n"
-                "Сообщений за 24 ч в архиве: {3}\n"
-                "Ключ AITunnel: {4} · модель: {5}\n\n"
+                "Сообщений за 24 ч в архиве: {3} (в выпуск берётся до {4})\n"
+                "Ключ AITunnel: {5} · модель: {6}\n\n"
                 "`.вестник вкл/выкл` · `.вестник время 21:00` · `.вестник сейчас`".format(
                     "включён ✅" if enabled else "выключен 🚫",
-                    fire_time, str(config.TIMEZONE), n, key, config.AI_MODEL),
+                    fire_time, str(config.TIMEZONE), n, config.DIGEST_MAX_MESSAGES,
+                    key, config.AI_MODEL),
             )
             return
 

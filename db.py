@@ -243,7 +243,7 @@ def log_message(chat_id, user_id, user_name, text):
     with _lock:
         _conn.execute(
             "INSERT INTO chat_log (chat_id, user_id, user_name, text, ts) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, user_id, user_name, text[:400], time.time()),
+            (chat_id, user_id, user_name, text[:800], time.time()),
         )
         _conn.commit()
 

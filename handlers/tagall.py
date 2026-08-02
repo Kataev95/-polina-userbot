@@ -43,11 +43,11 @@ def _help():
         "👥 **Тег участников (тихий призыв)**\n"
         "Формат: `.все <@username или ID группы> [текст]`\n\n"
         "Примеры:\n"
-        "`.все @bermuda_chat`\n"
-        "`.все -1001234567890 Сбор на ферму!`\n\n"
-        "Полина тегает по {0} чел., каждое сообщение сразу удаляет, "
-        "а прогресс шлёт сюда. Прервать в любой момент — `.стоп`.\n"
-        "Она должна состоять в группе (для больших — лучше администратором)."
+        "`.все @bermuda_chat` — тихий призыв: все теги удаляются\n"
+        "`.все -1001234567890 Утро доброе! 🥳` — текст-приветствие ОСТАЁТСЯ "
+        "с первой пачкой тегов, остальных дотегаю тихо\n\n"
+        "Тегаю по {0} чел. за раз, прогресс шлю сюда. Прервать — `.стоп`.\n"
+        "Полина должна состоять в группе (для больших — лучше администратором)."
     ).format(config.TAGALL_BATCH)
 
 
@@ -138,6 +138,7 @@ def register(client):
         progress = await event.respond("📢 Тегаю в «{0}»…\nПрогресс: 0/{1}\n(прервать — `.стоп`)".format(title, total))
         done = 0
         sent = 0
+        kept = 0   # сколько видимых сообщений оставили (первое с текстом)
 
         try:
             for i in range(0, total, config.TAGALL_BATCH):
@@ -168,11 +169,17 @@ def register(client):
                     return
 
                 sent += 1
-                await asyncio.sleep(config.TAGALL_DELETE_DELAY)
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
+                # Первое сообщение с текстом-приветствием оставляем в чате;
+                # остальные пачки (и всё при пустом тексте) — тихий тег с удалением.
+                keep = bool(extra) and i == 0
+                if keep:
+                    kept += 1
+                else:
+                    await asyncio.sleep(config.TAGALL_DELETE_DELAY)
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
 
                 done += len(batch)
                 _active["done"] = done
@@ -186,8 +193,12 @@ def register(client):
                 if i + config.TAGALL_BATCH < total:
                     await asyncio.sleep(config.TAGALL_BATCH_PAUSE)
 
+            if kept:
+                tail = "оставила 1 сообщение с текстом, остальные ({0}) удалила.".format(sent - kept)
+            else:
+                tail = "все {0} сообщений удалены (тихий тег).".format(sent)
             await progress.edit(
-                "✅ Готово: «{0}»\nУпомянула {1} чел. за {2} сообщений — все удалены.".format(title, total, sent)
+                "✅ Готово: «{0}»\nУпомянула {1} чел. — {2}".format(title, total, tail)
             )
         finally:
             _active = None

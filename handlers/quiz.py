@@ -33,9 +33,13 @@ from timers_core import mention, clean_name
 
 log = logging.getLogger("polina.quiz")
 
-SCAN_LIMIT = 3000    # максимум сообщений истории за один подсчёт
+# Реальную границу задаёт ссылка (min_id) или срез по времени — сканирование
+# останавливается на них само. SCAN_LIMIT — только аварийный предохранитель,
+# чтобы не листать историю за годы (50000 сообщений = ~500 запросов к API).
+SCAN_LIMIT = 50000
 VOTES_PAGE = 100     # голосов за один запрос GetPollVotes
 BOARD_LIMIT = 20     # строк в таблице лидеров
+PROGRESS_EVERY = 1000  # раз в сколько сообщений обновлять прогресс
 MEDALS = ["🥇", "🥈", "🥉"]
 
 PATTERN = re.compile(r"^\.(?:квиз|викторина)(?:\s+(\S+))?$", re.I)
@@ -129,11 +133,12 @@ async def _fetch_votes(client, chat_id, msg_id):
     return votes, names
 
 
-async def tally(client, chat_id, hours=None, from_msg_id=None):
+async def tally(client, chat_id, hours=None, from_msg_id=None, status=None):
     """Просканировать чат и посчитать итоги. Возвращает текст для публикации."""
     cutoff = None
     kwargs = {}
     if from_msg_id:
+        # Граница — сама ссылка: Telethon сам остановится, дойдя до min_id.
         kwargs["min_id"] = from_msg_id - 1   # включая само сообщение-ссылку
         period_label = "с указанного сообщения"
     else:
@@ -152,6 +157,12 @@ async def tally(client, chat_id, hours=None, from_msg_id=None):
         media = getattr(msg, "media", None)
         if isinstance(media, types.MessageMediaPoll) and getattr(media.poll, "quiz", False):
             quizzes.append(msg)
+        if status and scanned % PROGRESS_EVERY == 0:
+            try:
+                await status.edit("🧮 Листаю историю… {0} сообщений, найдено квизов: {1}".format(
+                    scanned, len(quizzes)))
+            except Exception:
+                pass
 
     if not quizzes:
         diag = "просмотрела {0} сообщений".format(scanned)
@@ -272,7 +283,8 @@ def register(client):
             status = await event.reply(wait_text)
 
         try:
-            text = await tally(event.client, target, hours=hours, from_msg_id=from_msg_id)
+            text = await tally(event.client, target, hours=hours, from_msg_id=from_msg_id,
+                               status=status)
         except Exception as e:
             log.exception("квиз: ошибка подсчёта")
             text = "⚠️ Не получилось посчитать: `{0}`".format(str(e)[:150])

@@ -6,6 +6,10 @@
     .квиз          — итоги викторин за последние 24 часа
     .квиз 12       — за последние 12 часов (1–72)
 
+Где запускать:
+- в ГРУППЕ — результат публикуется в группе (все видят);
+- в ЛС Полине — результат приходит тихо в ЛС (чат считается из ALLOWED_CHATS).
+
 Как это работает:
 - Полина сканирует историю чата и находит quiz-опросы;
 - правильный вариант виден, только если Полина сама проголосовала в квизе
@@ -174,6 +178,15 @@ async def tally(client, chat_id, hours):
 
 # ---------- Команда ----------
 
+def _target_chat(event):
+    """В группе — сама группа; в ЛС — единственный чат из ALLOWED_CHATS."""
+    if event.is_group:
+        return event.chat_id
+    if event.is_private and len(config.ALLOWED_CHATS) == 1:
+        return next(iter(config.ALLOWED_CHATS))
+    return None
+
+
 def register(client):
 
     @client.on(events.NewMessage(pattern=PATTERN))
@@ -182,21 +195,26 @@ def register(client):
             return
         if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
             return
-        if not event.is_group:
-            if event.is_private and event.sender_id == config.OWNER_ID:
-                await event.respond("🧮 Команду `.квиз` запускай в самой группе с викторинами.")
+
+        target = _target_chat(event)
+        if target is None:
+            await event.respond("🧮 Запусти `.квиз` в группе с викторинами "
+                                "(или задай ровно один чат в ALLOWED_CHATS).")
             return
 
         hours = int(event.pattern_match.group(1) or 24)
         hours = max(1, min(hours, 72))
 
+        wait_text = "🧮 Считаю результаты викторин за {0} ч…".format(hours)
         if event.out:
-            status = await event.edit("🧮 Считаю результаты викторин за {0} ч…".format(hours))
+            status = await event.edit(wait_text)
+        elif event.is_private:
+            status = await event.respond(wait_text)   # результат придёт сюда же, в ЛС
         else:
-            status = await event.reply("🧮 Считаю результаты викторин за {0} ч…".format(hours))
+            status = await event.reply(wait_text)
 
         try:
-            text = await tally(event.client, event.chat_id, hours)
+            text = await tally(event.client, target, hours)
         except Exception as e:
             log.exception("квиз: ошибка подсчёта")
             text = "⚠️ Не получилось посчитать: `{0}`".format(str(e)[:150])

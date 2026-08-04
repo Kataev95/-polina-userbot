@@ -1,23 +1,22 @@
 """Подсчёт результатов викторин (Telegram quiz-опросов) — команда .квиз.
 
 Владелец чата постит квизы, а Полина по команде сама считает, кто ответил
-правильно больше всех, и публикует таблицу лидеров.
+правильно больше всех, и выдаёт таблицу лидеров.
 
-    .квиз          — итоги викторин за последние 24 часа
-    .квиз 12       — за последние 12 часов (1–72)
+    .квиз                          — итоги за последние 24 часа
+    .квиз 12                       — за последние 12 часов (1–72)
+    .квиз https://t.me/c/…/123     — от указанного сообщения (первого квиза) и до конца.
+                                     Самый надёжный способ: пришли ссылку на ПЕРВЫЙ квиз,
+                                     остальные Полина найдёт сама.
 
 Где запускать:
 - в ГРУППЕ — результат публикуется в группе (все видят);
-- в ЛС Полине — результат приходит тихо в ЛС (чат считается из ALLOWED_CHATS).
+- в ЛС Полине — результат приходит тихо в ЛС (чат берётся из ALLOWED_CHATS).
 
-Как это работает:
-- Полина сканирует историю чата и находит quiz-опросы;
-- правильный вариант виден, только если Полина сама проголосовала в квизе
-  (поэтому владелец отвечает на все вопросы с аккаунта Полины);
-- списки голосовавших доступны только в НЕанонимных опросах;
+Нюансы:
+- правильный вариант виден, только если Полина сама проголосовала в квизе;
+- голоса видны только в НЕанонимных опросах;
 - голос самой Полины в зачёт не идёт.
-
-Команда — владельца, в самой группе (под Полиной или с основного аккаунта).
 """
 import asyncio
 import logging
@@ -34,25 +33,42 @@ from timers_core import mention, clean_name
 
 log = logging.getLogger("polina.quiz")
 
-SCAN_LIMIT = 800     # максимум сообщений истории за один подсчёт
+SCAN_LIMIT = 3000    # максимум сообщений истории за один подсчёт
 VOTES_PAGE = 100     # голосов за один запрос GetPollVotes
 BOARD_LIMIT = 20     # строк в таблице лидеров
 MEDALS = ["🥇", "🥈", "🥉"]
 
-PATTERN = re.compile(r"^\.(?:квиз|викторина)(?:\s+(\d{1,3}))?$", re.I)
+PATTERN = re.compile(r"^\.(?:квиз|викторина)(?:\s+(\S+))?$", re.I)
+LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:c/(\d+)|([A-Za-z0-9_]{4,}))/(\d+)", re.I)
 
 
 # ---------- Чистая логика (тестируется отдельно) ----------
+
+def parse_arg(arg):
+    """Аргумент команды -> ('hours', N) | ('link', internal_id|username, msg_id) | None."""
+    arg = (arg or "").strip()
+    if not arg:
+        return ("hours", 24)
+    if arg.isdigit():
+        return ("hours", max(1, min(int(arg), 72)))
+    m = LINK_RE.search(arg)
+    if m:
+        internal, username, msg_id = m.group(1), m.group(2), int(m.group(3))
+        if internal:
+            return ("link", -(1000000000000 + int(internal)), msg_id)
+        return ("link", username, msg_id)
+    return None
+
 
 def classify_vote(vote_options, correct_set):
     """Голос засчитывается как правильный, если выбран верный вариант."""
     return any(bytes(o) in correct_set for o in vote_options)
 
 
-def format_board(correct, answered, names, counted, hours,
+def format_board(correct, answered, names, counted, period_label,
                  skipped_anon=0, skipped_unknown=0, mention_fn=mention):
     """Собрать текст таблицы лидеров."""
-    lines = ["🏆 **Итоги викторин за {0} ч** — вопросов: {1}".format(hours, counted), ""]
+    lines = ["🏆 **Итоги викторин {0}** — вопросов: {1}".format(period_label, counted), ""]
     board = sorted(answered.keys(), key=lambda u: (-correct.get(u, 0), -answered[u], u))
     for idx, uid in enumerate(board[:BOARD_LIMIT]):
         score = correct.get(uid, 0)
@@ -104,7 +120,6 @@ async def _fetch_votes(client, chat_id, msg_id):
             elif isinstance(v, types.MessagePeerVote):
                 opts = [v.option]
             else:
-                # MessagePeerVoteInputOption — без фильтра по опции не приходит
                 opts = []
             votes.append((uid, opts))
         offset = getattr(res, "next_offset", None) or ""
@@ -114,20 +129,37 @@ async def _fetch_votes(client, chat_id, msg_id):
     return votes, names
 
 
-async def tally(client, chat_id, hours):
+async def tally(client, chat_id, hours=None, from_msg_id=None):
     """Просканировать чат и посчитать итоги. Возвращает текст для публикации."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = None
+    kwargs = {}
+    if from_msg_id:
+        kwargs["min_id"] = from_msg_id - 1   # включая само сообщение-ссылку
+        period_label = "с указанного сообщения"
+    else:
+        hours = hours or 24
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        period_label = "за {0} ч".format(hours)
+
     quizzes = []
-    async for msg in client.iter_messages(chat_id, limit=SCAN_LIMIT):
-        if msg.date < cutoff:
+    scanned = 0
+    oldest = None
+    async for msg in client.iter_messages(chat_id, limit=SCAN_LIMIT, **kwargs):
+        scanned += 1
+        oldest = msg.date
+        if cutoff is not None and msg.date < cutoff:
             break
         media = getattr(msg, "media", None)
         if isinstance(media, types.MessageMediaPoll) and getattr(media.poll, "quiz", False):
             quizzes.append(msg)
 
     if not quizzes:
-        return ("🤷‍♀️ За последние {0} ч не нашла ни одного квиза "
-                "(смотрю последние {1} сообщений).".format(hours, SCAN_LIMIT))
+        diag = "просмотрела {0} сообщений".format(scanned)
+        if oldest is not None:
+            diag += " (до {0})".format(oldest.astimezone(config.TIMEZONE).strftime("%d.%m %H:%M"))
+        return ("🤷‍♀️ Квизов не нашла — {0}.\n"
+                "Если викторина была раньше, пришли ссылку на ПЕРВЫЙ квиз: "
+                "`.квиз https://t.me/c/…/номер` — посчитаю от него.".format(diag))
 
     correct = Counter()
     answered = Counter()
@@ -167,12 +199,13 @@ async def tally(client, chat_id, hours):
             why.append("в {0} квизах Полина не голосовала (правильный ответ не виден)".format(skipped_unknown))
         if skipped_anon:
             why.append("{0} анонимных".format(skipped_anon))
-        return "🤷‍♀️ Квизы нашла, но посчитать нечего: {0}.".format("; ".join(why) or "нет данных")
+        return "🤷‍♀️ Нашла {0} квизов, но посчитать нечего: {1}.".format(
+            len(quizzes), "; ".join(why) or "нет данных")
 
     if not answered:
         return "🤷‍♀️ В {0} квизах никто, кроме Полины, не голосовал.".format(counted)
 
-    return format_board(correct, answered, names, counted, hours,
+    return format_board(correct, answered, names, counted, period_label,
                         skipped_anon, skipped_unknown)
 
 
@@ -196,16 +229,41 @@ def register(client):
         if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
             return
 
-        target = _target_chat(event)
+        parsed = parse_arg(event.pattern_match.group(1))
+        if parsed is None:
+            await event.respond("🧮 Не поняла. Примеры: `.квиз`, `.квиз 12`, "
+                                "`.квиз https://t.me/c/…/номер` (ссылка на первый квиз).")
+            return
+
+        hours = None
+        from_msg_id = None
+        target = None
+        if parsed[0] == "hours":
+            hours = parsed[1]
+            target = _target_chat(event)
+        else:
+            link_chat, from_msg_id = parsed[1], parsed[2]
+            if isinstance(link_chat, str):
+                # публичная ссылка t.me/username/123 — резолвим
+                try:
+                    from telethon import utils as tl_utils
+                    entity = await event.client.get_entity(link_chat)
+                    target = tl_utils.get_peer_id(entity)
+                except Exception:
+                    await event.respond("🚫 Не смогла открыть чат из ссылки.")
+                    return
+            else:
+                target = link_chat
+
         if target is None:
             await event.respond("🧮 Запусти `.квиз` в группе с викторинами "
                                 "(или задай ровно один чат в ALLOWED_CHATS).")
             return
+        if not config.chat_allowed(target):
+            await event.respond("🚫 Этот чат не в списке разрешённых (ALLOWED_CHATS).")
+            return
 
-        hours = int(event.pattern_match.group(1) or 24)
-        hours = max(1, min(hours, 72))
-
-        wait_text = "🧮 Считаю результаты викторин за {0} ч…".format(hours)
+        wait_text = "🧮 Считаю результаты викторин…"
         if event.out:
             status = await event.edit(wait_text)
         elif event.is_private:
@@ -214,7 +272,7 @@ def register(client):
             status = await event.reply(wait_text)
 
         try:
-            text = await tally(event.client, target, hours)
+            text = await tally(event.client, target, hours=hours, from_msg_id=from_msg_id)
         except Exception as e:
             log.exception("квиз: ошибка подсчёта")
             text = "⚠️ Не получилось посчитать: `{0}`".format(str(e)[:150])

@@ -13,6 +13,9 @@
 - в ГРУППЕ — результат публикуется в группе (все видят);
 - в ЛС Полине — результат приходит тихо в ЛС (чат берётся из ALLOWED_CHATS).
 
+Кто может: владелец и квиз-админы из QUIZ_ADMINS (ID через запятую в env) —
+им доступна только эта команда, остальное управление у владельца.
+
 Нюансы:
 - правильный вариант виден, только если Полина сама проголосовала в квизе;
 - голоса видны только в НЕанонимных опросах;
@@ -235,9 +238,12 @@ def register(client):
 
     @client.on(events.NewMessage(pattern=PATTERN))
     async def quiz_cmd(event):
-        if not (event.out or event.sender_id == config.OWNER_ID):
+        # Доступ: сама Полина, владелец и квиз-админы (QUIZ_ADMINS)
+        is_quiz_admin = event.sender_id in config.QUIZ_ADMINS
+        if not (event.out or event.sender_id == config.OWNER_ID or is_quiz_admin):
             return
-        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+        # Где можно: ЛС (владельца или квиз-админа) либо разрешённая группа
+        if not event.is_private and not config.chat_allowed(event.chat_id):
             return
 
         parsed = parse_arg(event.pattern_match.group(1))

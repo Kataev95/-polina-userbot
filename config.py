@@ -95,6 +95,14 @@ if _raw_allowed:
 # Вечерний вестник: экспорт лога чата за день файлом .md владельцу в ЛС
 DIGEST_TIME_DEFAULT = os.getenv("DIGEST_TIME", "21:00").strip()  # время отправки по умолчанию
 
+# Кому, кроме владельца, можно запускать .квиз в ЛС Полине (ID через запятую).
+QUIZ_ADMINS = set()
+_raw_qadmins = os.getenv("QUIZ_ADMINS", "1755726590,6035223740").strip()
+if _raw_qadmins:
+    for _part in re.split(r"[,\s]+", _raw_qadmins):
+        if _part.strip().isdigit():
+            QUIZ_ADMINS.add(int(_part.strip()))
+
 # Заполняются при старте (userbot.py)
 SELF_ID = 0        # id аккаунта, на котором запущена Полина
 STARTED_AT = 0.0

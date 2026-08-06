@@ -1,5 +1,5 @@
 """Регистрация всех обработчиков команд."""
-from . import gossip, misc, public, quiz, scheduler, tagall, voice, welcome
+from . import fun, gossip, misc, public, quiz, scheduler, tagall, voice, welcome
 
 
 def register_all(client):
@@ -10,4 +10,5 @@ def register_all(client):
     scheduler.register(client)  # .отложка — отложенные сообщения Telegram + авто-пополнение
     gossip.register(client)     # .вестник — лог чата файлом .md в ЛС
     quiz.register(client)       # .квиз — итоги викторин (кто ответил правильнее всех)
-    public.register(client)     # «Полина, таймер/таймеры/отмена/погода/заметки/помощь»
+    fun.register(client)        # .кубик <1-6> — «удачливый» кубик
+    public.register(client)     # «Полина, таймер/таймеры/отмена/погода/заметки/развлечения»

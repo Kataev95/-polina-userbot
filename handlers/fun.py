@@ -6,18 +6,28 @@
     «Полина, шар: идти на ферму?»    — магический шар (да / нет / спроси позже)
 
 Все команды с лёгким кулдауном (3 сек на человека), чтобы чат не заспамили.
+
+Плюс команда владельца `.кубик <1-6>` — «удачливый» кубик: Полина бросает,
+мгновенно смотрит значение (API отдаёт его до конца анимации) и удаляет
+неудачные броски, пока не выпадет нужное число 😏
 """
+import asyncio
 import logging
 import random
 import re
 import time
 
+from telethon import events
+from telethon.errors import FloodWaitError
 from telethon.tl.types import InputMediaDice
 
 import config
 from timers_core import mention, clean_name
 
 log = logging.getLogger("polina.fun")
+
+RIG_MAX_ATTEMPTS = 25   # (5/6)^25 ≈ 1% шанс не выбросить нужное
+RIG_PAUSE = 0.4         # пауза между попытками, сек
 
 FUN_COOLDOWN = 3      # сек между развлекательными командами на человека
 MEMBERS_TTL = 600     # кэш участников чата, сек
@@ -149,3 +159,73 @@ async def ball(event, question):
         await event.reply("🔮 Задайте вопрос: «{0}, шар: идти сегодня на ферму?»".format(config.BOT_NAME))
         return
     await event.reply("🔮 " + random.choice(_BALL))
+
+
+# ---------- «Удачливый» кубик: .кубик <1-6> (команда владельца) ----------
+
+DICE_CMD_RE = re.compile(r"^\.кубик(?:\s+([1-6]))?$", re.I)
+
+
+async def _roll(client, chat_id):
+    """Бросить кубик, вернуть (msg, value). value — то, на чём остановится анимация."""
+    msg = await client.send_file(chat_id, InputMediaDice("🎲"))
+    value = getattr(getattr(msg, "media", None), "value", None)
+    return msg, value
+
+
+async def _rigged_dice(client, chat_id, target):
+    """Бросаем, пока не выпадет target: неудачные сразу удаляем. -> итоговое value | None."""
+    for _ in range(RIG_MAX_ATTEMPTS):
+        try:
+            msg, value = await _roll(client, chat_id)
+        except FloodWaitError as e:
+            if e.seconds > 30:
+                break
+            await asyncio.sleep(e.seconds + 1)
+            continue
+        except Exception as e:
+            log.warning(".кубик: ошибка броска: %s", e)
+            break
+        if value == target:
+            return value  # оставляем — у всех докрутится до нужного числа
+        try:
+            await msg.delete()  # мгновенно убираем неудачный, пока анимация не докрутилась
+        except Exception:
+            pass
+        await asyncio.sleep(RIG_PAUSE)
+    return None
+
+
+def register(client):
+
+    @client.on(events.NewMessage(pattern=DICE_CMD_RE))
+    async def dice_cmd(event):
+        # «Читерский» кубик — только владелец (или сам аккаунт Полины)
+        if not (event.out or event.sender_id == config.OWNER_ID):
+            return
+        if not config.responds_here(event.chat_id, event.is_private, event.sender_id):
+            return
+
+        target = event.pattern_match.group(1)
+        # убираем саму команду, чтобы не палиться
+        try:
+            await event.delete()
+        except Exception:
+            pass
+
+        if not target:
+            # без числа — честный кубик
+            try:
+                await _roll(event.client, event.chat_id)
+            except Exception as e:
+                log.warning(".кубик: %s", e)
+            return
+
+        target = int(target)
+        got = await _rigged_dice(event.client, event.chat_id, target)
+        if got is None:
+            # не повезло за лимит попыток (~1%) — оставим как есть, честный бросок
+            try:
+                await _roll(event.client, event.chat_id)
+            except Exception:
+                pass

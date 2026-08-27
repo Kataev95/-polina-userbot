@@ -1,4 +1,4 @@
-"""Команда .тег — вопросы с тегом участников пачками по 5 каждые 30 минут."""
+"""Команда .тег — вопросы с тегом участников пачками по 5 с настраиваемым интервалом."""
 import asyncio
 import logging
 import math
@@ -13,8 +13,12 @@ from timers_core import mention
 
 log = logging.getLogger("polina.tagquiz")
 
-START_RE = re.compile(r"^\.тег(?:\s+(\S+))?\s*$", re.I)
+# .тег <ID/@username> [минуты]
+START_RE = re.compile(r"^\.тег(?:\s+(\S+))?(?:\s+(\d+))?\s*$", re.I)
 CANCEL_RE = re.compile(r"^\.(?:тегстоп|стоптег)$", re.I)
+DEFAULT_INTERVAL_MINUTES = 10
+MIN_INTERVAL_MINUTES = 1
+MAX_INTERVAL_MINUTES = 1440
 
 _active = None
 
@@ -22,18 +26,23 @@ _active = None
 def _help():
     return (
         "🏷 **Тег-вопросы**\n"
-        "Запуск: `.тег <@username или ID чата>`\n\n"
+        "Запуск: `.тег <@username или ID чата> [минуты]`\n\n"
+        "Примеры:\n"
+        "`.тег -1001234567890` — интервал 10 минут\n"
+        "`.тег -1001234567890 5` — каждые 5 минут\n"
+        "`.тег -1001234567890 10` — каждые 10 минут\n\n"
         "Я посчитаю участников, разобью их по {0} человек и скажу, сколько вопросов прислать.\n"
         "Каждый вопрос обязательно заканчивай знаком `?`. Можно отправлять по одному или несколькими сообщениями.\n\n"
-        "После получения всех вопросов первый уйдёт сразу, остальные — каждые 30 минут.\n"
+        "После получения всех вопросов первый уйдёт сразу, остальные — через выбранный интервал.\n"
         "Отмена: `.тегстоп`"
     ).format(config.TAGALL_BATCH)
 
 
 def _progress_text(state):
+    interval = state["interval_minutes"]
     if state.get("running"):
-        return "⏳ Тег-опрос уже запущен: отправлено {0}/{1}. Отмена — `.тегстоп`.".format(state["sent"], state["needed"])
-    return "📝 Тег-опрос ожидает вопросы: получено {0}/{1}. Пришли ещё {2} вопросов, каждый должен заканчиваться `?`. Отмена — `.тегстоп`.".format(len(state["questions"]), state["needed"], state["needed"] - len(state["questions"]))
+        return "⏳ Тег-опрос уже запущен: отправлено {0}/{1}. Интервал: {2} мин. Отмена — `.тегстоп`.".format(state["sent"], state["needed"], interval)
+    return "📝 Тег-опрос ожидает вопросы: получено {0}/{1}. Пришли ещё {2} вопросов. Интервал: {3} мин. Каждый вопрос должен заканчиваться `?`. Отмена — `.тегстоп`.".format(len(state["questions"]), state["needed"], state["needed"] - len(state["questions"]), interval)
 
 
 async def _resolve(client, target):
@@ -66,6 +75,7 @@ async def _run(client, state):
     global _active
     try:
         total_batches = state["needed"]
+        interval_minutes = state["interval_minutes"]
         for index in range(total_batches):
             if state["cancel"]:
                 await client.send_message(config.OWNER_ID, "⛔️ Тег-вопросы остановлены.")
@@ -88,14 +98,14 @@ async def _run(client, state):
 
             state["sent"] = index + 1
             if index + 1 < total_batches:
-                await client.send_message(config.OWNER_ID, "🏷 Отправлено {0}/{1}. Следующее через 30 минут.".format(state["sent"], total_batches))
-                await asyncio.sleep(30 * 60)
+                await client.send_message(config.OWNER_ID, "🏷 Отправлено {0}/{1}. Следующее через {2} мин.".format(state["sent"], total_batches, interval_minutes))
+                await asyncio.sleep(interval_minutes * 60)
 
         await client.send_message(config.OWNER_ID, "🏁 Тег-вопросы завершены. Отправлено {0} сообщений, охвачено {1} участников.".format(total_batches, len(state["users"])))
     except Exception:
         log.exception(".тег: критическая ошибка в задаче")
         try:
-            await client.send_message(config.OWNER_ID, "🚫 Тег-опрос остановлен из-за внутренней ошибки. Можно запустить заново командой `.тег <ID чата>`.")
+            await client.send_message(config.OWNER_ID, "🚫 Тег-опрос остановлен из-за внутренней ошибки. Можно запустить заново командой `.тег <ID чата> [минуты]`.")
         except Exception:
             pass
     finally:
@@ -117,7 +127,7 @@ def register(client):
         state["cancel"] = True
         if not state.get("running"):
             _active = None
-            await event.respond("⛔️ Ожидание вопросов отменено. Теперь можно сразу запустить новый `.тег <ID чата>`.")
+            await event.respond("⛔️ Ожидание вопросов отменено. Теперь можно сразу запустить новый `.тег <ID чата> [минуты]`.")
         else:
             await event.respond("⛔️ Останавливаю тег-опрос…")
 
@@ -128,11 +138,17 @@ def register(client):
             return
 
         target = event.pattern_match.group(1)
+        interval_text = event.pattern_match.group(2)
         if not target:
             await event.respond(_help())
             return
         if _active:
             await event.respond(_progress_text(_active))
+            return
+
+        interval_minutes = int(interval_text) if interval_text else DEFAULT_INTERVAL_MINUTES
+        if not MIN_INTERVAL_MINUTES <= interval_minutes <= MAX_INTERVAL_MINUTES:
+            await event.respond("🚫 Интервал должен быть от {0} до {1} минут.".format(MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES))
             return
 
         entity = await _resolve(event.client, target)
@@ -165,11 +181,12 @@ def register(client):
             "cancel": False,
             "running": False,
             "sent": 0,
+            "interval_minutes": interval_minutes,
         }
         await event.respond(
-            "📊 Чат «{0}»: {1} участников.\n🏷 По {2} человек = **{3} сообщений**.\n\n"
+            "📊 Чат «{0}»: {1} участников.\n🏷 По {2} человек = **{3} сообщений**.\n⏱ Интервал: **{4} мин.**\n\n"
             "Пришли мне **{3} вопросов**. Каждый вопрос заканчивай `?`. Можно несколькими сообщениями.\n"
-            "Получено: 0/{3}. Отмена: `.тегстоп`".format(title, len(users), config.TAGALL_BATCH, needed)
+            "Первый вопрос уйдёт сразу после получения всех вопросов. Получено: 0/{3}. Отмена: `.тегстоп`".format(title, len(users), config.TAGALL_BATCH, needed, interval_minutes)
         )
 
     @client.on(events.NewMessage)
@@ -195,10 +212,10 @@ def register(client):
         needed = _active["needed"]
 
         if got < needed:
-            await event.respond("📝 Получено вопросов: {0}/{1}. Осталось: {2}.".format(got, needed, needed - got))
+            await event.respond("📝 Получено вопросов: {0}/{1}. Осталось: {2}. Интервал: {3} мин.".format(got, needed, needed - got, _active["interval_minutes"]))
             return
 
         state = _active
         state["running"] = True
-        await event.respond("✅ Получено {0}/{0} вопросов. Первый вопрос отправляю сейчас, затем каждые 30 минут.".format(needed))
+        await event.respond("✅ Получено {0}/{0} вопросов. Первый вопрос отправляю сейчас, затем каждые {1} мин.".format(needed, state["interval_minutes"]))
         asyncio.create_task(_run(event.client, state))

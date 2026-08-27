@@ -3,4 +3,5 @@ __pycache__/
 .env
 *.session
 *.session-journal
-data/
+# Исходные файлы data/ (например fate_tasks.py) должны попадать в Git и deployment.
+# Локальные данные при необходимости добавляйте отдельными правилами.

@@ -1,11 +1,12 @@
 """Регистрация всех обработчиков команд."""
-from . import fun, gossip, misc, public, quiz, scheduler, tagall, tagquiz, voice, welcome
+from . import fate, fun, gossip, misc, public, quiz, scheduler, tagall, tagquiz, voice, welcome
 
 
 def register_all(client):
     voice.register(client)      # .гс
     tagall.register(client)     # .все, .стоп
     tagquiz.register(client)    # .тег — вопросы + 5 тегов каждые 30 минут
+    fate.register(client)       # .судьба, .судьба я
     misc.register(client)       # .пинг .погода .ид .полина вкл/выкл .помощь
     welcome.register(client)    # приветствие новичков + .привет
     scheduler.register(client)  # .отложка — отложенные сообщения Telegram + авто-пополнение

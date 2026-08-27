@@ -1,13 +1,4 @@
-"""Команда .тег — вопросы с тегом участников пачками по 5 каждые 30 минут.
-
-Запуск только владельцем в ЛС:
-    .тег <@username или ID чата>
-
-После подсчёта участников Полина просит нужное число вопросов.
-Каждый фрагмент текста, заканчивающийся на ?, считается отдельным вопросом.
-Каждый вопрос отправляется вместе со следующими 5 кликабельными тегами.
-Сообщения в целевом чате НЕ удаляются.
-"""
+"""Команда .тег — вопросы с тегом участников пачками по 5 каждые 30 минут."""
 import asyncio
 import logging
 import math
@@ -32,12 +23,17 @@ def _help():
     return (
         "🏷 **Тег-вопросы**\n"
         "Запуск: `.тег <@username или ID чата>`\n\n"
-        "Я посчитаю участников, разобью их по {0} человек и скажу, сколько вопросов прислать. "
-        "Каждый новый вопрос должен заканчиваться знаком `?`.\n\n"
-        "После получения всех вопросов отправлю первый сразу, затем — по одному каждые 30 минут. "
-        "Сообщения в чате остаются.\n"
+        "Я посчитаю участников, разобью их по {0} человек и скажу, сколько вопросов прислать.\n"
+        "Каждый вопрос обязательно заканчивай знаком `?`. Можно отправлять по одному или несколькими сообщениями.\n\n"
+        "После получения всех вопросов первый уйдёт сразу, остальные — каждые 30 минут.\n"
         "Отмена: `.тегстоп`"
     ).format(config.TAGALL_BATCH)
+
+
+def _progress_text(state):
+    if state.get("running"):
+        return "⏳ Тег-опрос уже запущен: отправлено {0}/{1}. Отмена — `.тегстоп`.".format(state["sent"], state["needed"])
+    return "📝 Тег-опрос ожидает вопросы: получено {0}/{1}. Пришли ещё {2} вопросов, каждый должен заканчиваться `?`. Отмена — `.тегстоп`.".format(len(state["questions"]), state["needed"], state["needed"] - len(state["questions"]))
 
 
 async def _resolve(client, target):
@@ -63,12 +59,11 @@ async def _collect(client, entity):
 
 
 def _extract_questions(text):
-    # Вопрос — любой фрагмент, завершённый ?. Поддерживаются несколько вопросов в одном сообщении.
     return [q.strip() for q in re.findall(r"[^?]+\?", text, flags=re.S) if q.strip()]
 
 
 async def _run(client, state):
-    state["running"] = True
+    global _active
     try:
         total_batches = state["needed"]
         for index in range(total_batches):
@@ -87,41 +82,44 @@ async def _run(client, state):
                 await client.send_message(config.OWNER_ID, "⏳ Telegram просит паузу {0} сек. Тег-вопросы остановлены.".format(e.seconds))
                 return
             except Exception as e:
-                log.warning(".тег: ошибка отправки: %s", e)
+                log.exception(".тег: ошибка отправки")
                 await client.send_message(config.OWNER_ID, "🚫 Ошибка отправки: `{0}`".format(str(e)[:150]))
                 return
 
             state["sent"] = index + 1
-            await client.send_message(
-                config.OWNER_ID,
-                "🏷 Отправлено {0}/{1}. Следующее через 30 минут.".format(state["sent"], total_batches)
-            )
-
             if index + 1 < total_batches:
+                await client.send_message(config.OWNER_ID, "🏷 Отправлено {0}/{1}. Следующее через 30 минут.".format(state["sent"], total_batches))
                 await asyncio.sleep(30 * 60)
 
-        await client.send_message(
-            config.OWNER_ID,
-            "🏁 Тег-вопросы завершены. Отправлено {0} сообщений, охвачено {1} участников.".format(
-                total_batches, len(state["users"])
-            )
-        )
+        await client.send_message(config.OWNER_ID, "🏁 Тег-вопросы завершены. Отправлено {0} сообщений, охвачено {1} участников.".format(total_batches, len(state["users"])))
+    except Exception:
+        log.exception(".тег: критическая ошибка в задаче")
+        try:
+            await client.send_message(config.OWNER_ID, "🚫 Тег-опрос остановлен из-за внутренней ошибки. Можно запустить заново командой `.тег <ID чата>`.")
+        except Exception:
+            pass
     finally:
-        global _active
-        _active = None
+        if _active is state:
+            _active = None
 
 
 def register(client):
 
     @client.on(events.NewMessage(pattern=CANCEL_RE))
     async def cancel_cmd(event):
+        global _active
         if not event.is_private or event.sender_id != config.OWNER_ID:
             return
         if not _active:
-            await event.respond("ℹ️ Сейчас нет активного тег-вопроса.")
+            await event.respond("ℹ️ Сейчас нет активного тег-опроса.")
             return
-        _active["cancel"] = True
-        await event.respond("⛔️ Останавливаю тег-вопросы…")
+        state = _active
+        state["cancel"] = True
+        if not state.get("running"):
+            _active = None
+            await event.respond("⛔️ Ожидание вопросов отменено. Теперь можно сразу запустить новый `.тег <ID чата>`.")
+        else:
+            await event.respond("⛔️ Останавливаю тег-опрос…")
 
     @client.on(events.NewMessage(pattern=START_RE))
     async def start_cmd(event):
@@ -134,7 +132,7 @@ def register(client):
             await event.respond(_help())
             return
         if _active:
-            await event.respond("⏳ Уже есть активный тег-вопрос. Отмена — `.тегстоп`.")
+            await event.respond(_progress_text(_active))
             return
 
         entity = await _resolve(event.client, target)
@@ -169,12 +167,9 @@ def register(client):
             "sent": 0,
         }
         await event.respond(
-            "📊 Чат «{0}»: {1} участников.\n"
-            "🏷 По {2} человек = **{3} сообщений**.\n\n"
-            "Пришли мне **{3} вопросов**. Каждый вопрос обязательно заканчивай `?`. "
-            "Можно отправлять несколькими сообщениями.\n"
-            "Получено: 0/{3}.\n"
-            "Отмена: `.тегстоп`".format(title, len(users), config.TAGALL_BATCH, needed)
+            "📊 Чат «{0}»: {1} участников.\n🏷 По {2} человек = **{3} сообщений**.\n\n"
+            "Пришли мне **{3} вопросов**. Каждый вопрос заканчивай `?`. Можно несколькими сообщениями.\n"
+            "Получено: 0/{3}. Отмена: `.тегстоп`".format(title, len(users), config.TAGALL_BATCH, needed)
         )
 
     @client.on(events.NewMessage)
@@ -203,5 +198,7 @@ def register(client):
             await event.respond("📝 Получено вопросов: {0}/{1}. Осталось: {2}.".format(got, needed, needed - got))
             return
 
-        await event.respond("✅ Получено {0}/{0} вопросов. Запускаю: первый вопрос сейчас, затем каждые 30 минут.".format(needed))
-        asyncio.create_task(_run(event.client, _active))
+        state = _active
+        state["running"] = True
+        await event.respond("✅ Получено {0}/{0} вопросов. Первый вопрос отправляю сейчас, затем каждые 30 минут.".format(needed))
+        asyncio.create_task(_run(event.client, state))
